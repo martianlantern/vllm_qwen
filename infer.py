@@ -1,4 +1,6 @@
 import os
+os.environ['VLLM_USE_V1'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch
 
 from vllm import LLM, SamplingParams
@@ -6,8 +8,6 @@ from transformers import Qwen3OmniMoeProcessor
 from qwen_omni_utils import process_mm_info
 
 if __name__ == '__main__':
-    # vLLM engine v1 not supported yet
-    os.environ['VLLM_USE_V1'] = '0'
 
     MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     # MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
@@ -15,10 +15,9 @@ if __name__ == '__main__':
     llm = LLM(
             model=MODEL_PATH, trust_remote_code=True, gpu_memory_utilization=0.95,
             tensor_parallel_size=torch.cuda.device_count(),
-            limit_mm_per_prompt={'image': 3, 'video': 3, 'audio': 3},
-            max_num_seqs=8,
-            max_model_len=32768,
-            seed=1234,
+            limit_mm_per_prompt={'image': 0, 'video': 0, 'audio': 1},
+            max_num_seqs=4,
+            max_model_len=32768
     )
 
     sampling_params = SamplingParams(
@@ -54,8 +53,8 @@ if __name__ == '__main__':
         },
     }
 
-    if images is not None:
-        inputs['multi_modal_data']['image'] = images
+    # if images is not None:
+    #     inputs['multi_modal_data']['image'] = images
     # if videos is not None:
     #     inputs['multi_modal_data']['video'] = videos
     if audios is not None:
