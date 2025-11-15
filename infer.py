@@ -56,8 +56,8 @@ if __name__ == '__main__':
 
     if images is not None:
         inputs['multi_modal_data']['image'] = images
-    if videos is not None:
-        inputs['multi_modal_data']['video'] = videos
+    # if videos is not None:
+    #     inputs['multi_modal_data']['video'] = videos
     if audios is not None:
         inputs['multi_modal_data']['audio'] = audios
 
