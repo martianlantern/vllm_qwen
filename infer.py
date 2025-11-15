@@ -33,7 +33,7 @@ if __name__ == '__main__':
         {
             "role": "user",
             "content": [
-                {"type": "video", "video": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"}
+                {"type": "audio", "audio": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/cough.wav"},
             ], 
         }
     ]
@@ -43,7 +43,7 @@ if __name__ == '__main__':
         tokenize=False,
         add_generation_prompt=True,
     )
-    audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
+    audios, images, videos = process_mm_info(messages)
 
     inputs = {
         'prompt': text,
