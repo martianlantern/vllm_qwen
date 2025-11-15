@@ -59,10 +59,10 @@ if __name__ == '__main__':
     # if videos is not None:
     #     inputs['multi_modal_data']['video'] = videos
     if audios is not None:
-        print("audios: ", len(audios), audios)
         inputs['multi_modal_data']['audio'] = audios
 
     outputs = llm.generate([inputs], sampling_params=sampling_params)
 
+    print(outputs[0])
     print(outputs[0].outputs[0].text)
 
