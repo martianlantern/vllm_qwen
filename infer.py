@@ -35,7 +35,7 @@ if __name__ == '__main__':
             "role": "user",
             "content": [
                 {"type": "text", "text": "Please describe the audio content."},
-                {"type": "audio", "audio": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/cough.wav"},
+                {"type": "audio", "audio": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/cough.wav", "type": "audio_url"},
             ], 
         }
     ]
