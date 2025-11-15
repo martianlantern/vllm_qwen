@@ -1,5 +1,5 @@
 import os
-os.environ['VLLM_USE_V1'] = '0'
+os.environ['VLLM_USE_V1']='0'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import torch
 
@@ -34,7 +34,7 @@ if __name__ == '__main__':
             "role": "user",
             "content": [
                 {"type": "text", "text": "Please describe the audio content."},
-                # {"type": "audio", "audio": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/cough.wav"},
+                {"type": "audio", "audio": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/cough.wav"},
             ], 
         }
     ]
@@ -59,6 +59,7 @@ if __name__ == '__main__':
     # if videos is not None:
     #     inputs['multi_modal_data']['video'] = videos
     if audios is not None:
+        print("audios: ", len(audios), audios)
         inputs['multi_modal_data']['audio'] = audios
 
     outputs = llm.generate([inputs], sampling_params=sampling_params)
