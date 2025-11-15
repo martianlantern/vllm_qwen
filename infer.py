@@ -63,6 +63,31 @@ if __name__ == '__main__':
 
     outputs = llm.generate([inputs], sampling_params=sampling_params)
 
-    print(outputs[0])
+# metrics=RequestMetrics(
+#     arrival_time=1763216391.670061,
+#     last_token_time=1763216398.9073935,
+#     first_scheduled_time=1763216398.399984,
+#     first_token_time=1763216398.6743326,
+#     time_in_queue=6.729922771453857,
+#     finished_time=1763216398.9077063,
+#     scheduler_time=0.003161802887916565,
+#     model_forward_time=None,
+#     model_execute_time=None,
+#     spec_token_acceptance_counts=[0]
+# )
+    num_tokens = len(outputs[0].outputs[0].token_ids)
+    metrics = outputs[0].metrics
+    time_in_queue = metrics.time_in_queue
+    time_to_first_token = metrics.first_token_time - metrics.arrival_time
+    e2e_latency = metrics.finished_time - metrics.arrival_time
+    time_per_output_token = e2e_latency / num_tokens
+    inter_token_latency = (metrics.last_token_time - metrics.first_token_time) / (num_tokens - 1)
+
+    print(f"Time to first token: {time_to_first_token*1000} ms")
+    print(f"E2E latency: {e2e_latency*1000} ms")
+    print(f"Time per output token: {time_per_output_token*1000} ms")
+    print(f"Inter-token latency: {inter_token_latency*1000} ms")
+    print(f"Time in queue: {time_in_queue*1000} ms")
+
     print(outputs[0].outputs[0].text)
 
