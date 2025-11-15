@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import time
 from collections import Counter as collectionsCounter
 from collections import deque
@@ -16,15 +17,16 @@ import torch
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, SchedulerConfig, VllmConfig)
-from vllm.config.lora import LoRAConfig
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
 from vllm.executor.executor_base import ExecutorBase
@@ -34,18 +36,20 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.logits_process import get_bad_words_logits_processors
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding import (
+    get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.pooling_params import PoolingParams
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
-                           Sequence, SequenceGroup, SequenceGroupBase,
-                           SequenceGroupMetadata, SequenceGroupOutput,
-                           SequenceStatus)
+                           PoolingSequenceGroupOutput, Sequence, SequenceGroup,
+                           SequenceGroupBase, SequenceGroupMetadata,
+                           SequenceGroupOutput, SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -91,12 +95,15 @@ class OutputData(NamedTuple):
 
 class SchedulerContext:
 
-    def __init__(self) -> None:
+    def __init__(self, multi_step_stream_outputs: bool = False):
         self.output_queue: Deque[OutputData] = deque()
-        self.request_outputs: List[RequestOutput] = []
+        self.request_outputs: List[Union[RequestOutput,
+                                         PoolingRequestOutput]] = []
         self.seq_group_metadata_list: Optional[
             List[SequenceGroupMetadata]] = None
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
+
+        self.multi_step_stream_outputs: bool = multi_step_stream_outputs
 
     def append_output(self, outputs: List[SamplerOutput],
                       seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -216,6 +223,7 @@ class LLMEngine:
         self.load_config = vllm_config.load_config
         self.decoding_config = vllm_config.decoding_config or DecodingConfig(  # noqa
         )
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
         self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
         )
 
@@ -230,14 +238,14 @@ class LLMEngine:
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
 
-        if self.model_config.skip_tokenizer_init:
-            self.tokenizer = None
-            self.detokenizer = None
-            tokenizer_group = None
-        else:
+        if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
             tokenizer_group = self.get_tokenizer_group()
+        else:
+            self.tokenizer = None
+            self.detokenizer = None
+            tokenizer_group = None
 
         # Ensure that the function doesn't contain a reference to self,
         # to avoid engine GC issues
@@ -250,17 +258,14 @@ class LLMEngine:
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
 
-        self.input_preprocessor = InputPreprocessor(
-            self.model_config,
-            self.tokenizer,
-            mm_registry,
-            mm_processor_cache=processor_only_cache_from_config(
-                self.model_config, mm_registry),
-        )
+        self.input_preprocessor = InputPreprocessor(self.model_config,
+                                                    self.tokenizer,
+                                                    mm_registry)
 
         self.model_executor = executor_class(vllm_config=vllm_config)
 
-        self._initialize_kv_caches()
+        if self.model_config.runner_type != "pooling":
+            self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -279,8 +284,7 @@ class LLMEngine:
                     self.cache_config.block_size,
                     "gpu_memory_utilization":
                     self.cache_config.gpu_memory_utilization,
-                    "kv_cache_memory_bytes":
-                    self.cache_config.kv_cache_memory_bytes,
+
                     # Quantization
                     "quantization":
                     self.model_config.quantization,
@@ -290,6 +294,8 @@ class LLMEngine:
                     # Feature flags
                     "enable_lora":
                     bool(self.lora_config),
+                    "enable_prompt_adapter":
+                    bool(self.prompt_adapter_config),
                     "enable_prefix_caching":
                     self.cache_config.enable_prefix_caching,
                     "enforce_eager":
@@ -304,7 +310,8 @@ class LLMEngine:
         ]
 
         self.scheduler_contexts = [
-            SchedulerContext()
+            SchedulerContext(multi_step_stream_outputs=self.scheduler_config.
+                             multi_step_stream_outputs)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
 
@@ -373,14 +380,6 @@ class LLMEngine:
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
 
-        # Initialize reasoning parser if reasoning backend is set.
-        if self.decoding_config.reasoning_backend and \
-                self.tokenizer:
-            reasoner_class = ReasoningParserManager.get_reasoning_parser(
-                self.decoding_config.reasoning_backend)
-            self.reasoner: ReasoningParser = reasoner_class(
-                self.tokenizer.get_lora_tokenizer())
-
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -390,12 +389,8 @@ class LLMEngine:
                 self.scheduler,
                 self.seq_counter,
                 get_tokenizer_for_seq,
-                stop_checker=StopChecker(
-                    self.scheduler_config.max_model_len,
-                    get_tokenizer_for_seq,
-                    self.reasoner if self.decoding_config.reasoning_backend
-                    and self.tokenizer else None,
-                ),
+                stop_checker=StopChecker(self.scheduler_config.max_model_len,
+                                         get_tokenizer_for_seq),
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
@@ -547,14 +542,18 @@ class LLMEngine:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
+        if self.prompt_adapter_config:
+            self.prompt_adapter_config.verify_with_model_config(
+                self.model_config)
 
     def _add_processed_request(
         self,
         request_id: str,
         processed_inputs: ProcessorInputs,
-        params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> Optional[SequenceGroup]:
@@ -570,6 +569,7 @@ class LLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
             )
             return None
@@ -583,12 +583,13 @@ class LLMEngine:
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
         seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
-                       lora_request)
+                       lora_request, prompt_adapter_request)
 
         encoder_seq = (None if encoder_inputs is None else Sequence(
-            seq_id, encoder_inputs, block_size, eos_token_id, lora_request))
+            seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
+            prompt_adapter_request))
 
-        # Create a SequenceGroup based on SamplingParams
+        # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
             seq_group = self._create_sequence_group_with_sampling(
                 request_id,
@@ -597,10 +598,22 @@ class LLMEngine:
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
+                encoder_seq=encoder_seq,
+                priority=priority)
+        elif isinstance(params, PoolingParams):
+            seq_group = self._create_sequence_group_with_pooling(
+                request_id,
+                seq,
+                params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq,
                 priority=priority)
         else:
-            raise ValueError("SamplingParams must be provided.")
+            raise ValueError(
+                "Either SamplingParams or PoolingParams must be provided.")
 
         # Add the sequence group to the scheduler with least unfinished seqs.
         costs = [
@@ -619,11 +632,12 @@ class LLMEngine:
         self,
         request_id: str,
         prompt: PromptType,
-        params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
         """Add a request to the engine's request pool.
@@ -637,22 +651,24 @@ class LLMEngine:
             prompt: The prompt to the LLM. See
                 [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each input.
-            params: Parameters for sampling.
+            params: Parameters for sampling or pooling.
                 [SamplingParams][vllm.SamplingParams] for text generation.
+                [PoolingParams][vllm.PoolingParams] for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
             lora_request: The LoRA request to add.
             trace_headers: OpenTelemetry trace headers.
+            prompt_adapter_request: The prompt adapter request to add.
             priority: The priority of the request.
                 Only applicable with priority scheduling.
 
         Details:
             - Set arrival_time to the current time if it is None.
             - Set prompt_token_ids to the encoded prompt if it is None.
-            - Create `n` number of [Sequence][vllm.sequence.Sequence] objects.
-            - Create a [SequenceGroup][vllm.sequence.SequenceGroup] object
-              from the list of [Sequence][vllm.sequence.Sequence].
-            - Add the [SequenceGroup][vllm.sequence.SequenceGroup] object to the
+            - Create `n` number of [Sequence][vllm.Sequence] objects.
+            - Create a [SequenceGroup][vllm.SequenceGroup] object
+              from the list of [Sequence][vllm.Sequence].
+            - Add the [SequenceGroup][vllm.SequenceGroup] object to the
               scheduler.
 
         Example:
@@ -684,9 +700,11 @@ class LLMEngine:
                              "Priority scheduling is not enabled.")
 
         if isinstance(params, SamplingParams) \
-            and params.logits_processors:
+            and (params.guided_decoding or params.logits_processors) \
+            and self.scheduler_config.num_scheduler_steps > 1:
             raise ValueError(
-                "Logits processors are not supported in multi-step decoding")
+                "Guided decoding and logits processors are not supported "
+                "in multi-step decoding")
 
         if arrival_time is None:
             arrival_time = time.time()
@@ -701,6 +719,7 @@ class LLMEngine:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
         )
 
         self._add_processed_request(
@@ -709,6 +728,7 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request,
             trace_headers=trace_headers,
             priority=priority,
         )
@@ -721,6 +741,7 @@ class LLMEngine:
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         encoder_seq: Optional[Sequence] = None,
         priority: int = 0,
     ) -> SequenceGroup:
@@ -748,16 +769,44 @@ class LLMEngine:
         if self.vllm_config.speculative_config is not None:
             draft_size = \
                 self.vllm_config.speculative_config.num_speculative_tokens + 1
-        seq_group = SequenceGroup(request_id=request_id,
-                                  seqs=[seq],
-                                  arrival_time=arrival_time,
-                                  sampling_params=sampling_params,
-                                  lora_request=lora_request,
-                                  trace_headers=trace_headers,
-                                  encoder_seq=encoder_seq,
-                                  priority=priority,
-                                  draft_size=draft_size)
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            prompt_adapter_request=prompt_adapter_request,
+            encoder_seq=encoder_seq,
+            priority=priority,
+            draft_size=draft_size)
 
+        return seq_group
+
+    def _create_sequence_group_with_pooling(
+        self,
+        request_id: str,
+        seq: Sequence,
+        pooling_params: PoolingParams,
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+        prompt_adapter_request: Optional[PromptAdapterRequest],
+        encoder_seq: Optional[Sequence] = None,
+        priority: int = 0,
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with PoolingParams."""
+        # Defensive copy of PoolingParams, which are used by the pooler
+        pooling_params = pooling_params.clone()
+        # Create the sequence group.
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            pooling_params=pooling_params,
+            prompt_adapter_request=prompt_adapter_request,
+            encoder_seq=encoder_seq,
+            priority=priority)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -822,8 +871,7 @@ class LLMEngine:
 
     def reset_mm_cache(self) -> bool:
         """Reset the multi-modal cache."""
-        self.input_preprocessor.clear_cache()
-        return True
+        return self.input_preprocessor.mm_registry.reset_processor_cache()
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""
@@ -832,6 +880,57 @@ class LLMEngine:
         for scheduler in self.scheduler:
             success = success and scheduler.reset_prefix_cache(device)
         return success
+
+    @staticmethod
+    def _process_sequence_group_outputs(
+        seq_group: SequenceGroup,
+        outputs: List[PoolingSequenceGroupOutput],
+    ) -> None:
+        seq_group.pooled_data = outputs[0].data
+
+        for seq in seq_group.get_seqs():
+            seq.status = SequenceStatus.FINISHED_STOPPED
+
+        return
+
+    def _update_num_computed_tokens_for_multi_step_prefill(
+            self, seq_group: SequenceGroup,
+            seq_group_meta: SequenceGroupMetadata,
+            is_first_step_output: Optional[bool]):
+        """
+        This function updates num_computed_tokens for prompt sequences
+        when Multi-Step is enabled.
+
+        seq_group: SequenceGroup to update the num_computed_tokens for.
+        seq_group_meta: Metadata of the given SequenceGroup.
+        is_first_step_output: Optional[bool] -
+            When available, is_first_step_output indicates if the appended
+            output token is the output of the first-step in multi-step.
+            A value of None indicates that outputs from all steps in
+            in multi-step are submitted in a single burst.
+        """
+
+        assert self.scheduler_config.is_multi_step
+
+        if not seq_group_meta.is_prompt:
+            # num_computed_token updates for multi-step decodes happen after
+            # the tokens are appended to the sequence.
+            return
+
+        do_update: bool = False
+        if self.scheduler_config.chunked_prefill_enabled:
+            # In multi-step + chunked-prefill case, the prompt sequences
+            # that are scheduled are fully processed in the first step.
+            do_update = is_first_step_output is None or is_first_step_output
+        else:
+            # Normal multi-step decoding case. In this case prompt-sequences
+            # are actually single-stepped. Always update in this case.
+            assert seq_group.state.num_steps == 1
+            do_update = True
+
+        if do_update:
+            seq_group.update_num_computed_tokens(
+                seq_group_meta.token_chunk_size)
 
     def _process_model_outputs(self,
                                ctx: SchedulerContext,
@@ -865,8 +964,33 @@ class LLMEngine:
 
         has_multiple_outputs: bool = len(outputs) > 1
         outputs_by_sequence_group: List[List[SequenceGroupOutput]]
-        assert not has_multiple_outputs
-        outputs_by_sequence_group = outputs
+        if has_multiple_outputs:
+            assert self.scheduler_config.is_multi_step or \
+                     self.speculative_config
+            # Organize outputs by [step][sequence group] instead of
+            # [sequence group][step].
+            if self.scheduler_config.is_multi_step:
+                outputs_by_sequence_group = create_output_by_sequence_group(
+                    outputs, len(seq_group_metadata_list))
+            elif self.speculative_config:
+                # Decodes are multi-steps while prefills are not, outputting at
+                # most 1 token. Separate them so that we can trigger chunk
+                # processing without having to pad or copy over prompts K times
+                # to match decodes structure (costly with prompt_logprobs).
+                num_prefills = sum(sg.is_prompt
+                                   for sg in seq_group_metadata_list)
+                prefills, decodes = outputs[:num_prefills], outputs[
+                    num_prefills:]
+                outputs_by_sequence_group = create_output_by_sequence_group(
+                    decodes,
+                    num_seq_groups=len(seq_group_metadata_list) - num_prefills)
+                outputs_by_sequence_group = [p.outputs for p in prefills
+                                             ] + outputs_by_sequence_group
+            # We have outputs for multiple steps submitted in a single burst,
+            # so invalidate is_first_step_output.
+            is_first_step_output = None
+        else:
+            outputs_by_sequence_group = outputs
 
         # Determine the requests we need to operate on
         if request_id:
@@ -907,8 +1031,13 @@ class LLMEngine:
                 output = [outputs_by_sequence_group[0][i]]
 
             if not is_async:
-                seq_group.update_num_computed_tokens(
-                    seq_group_meta.token_chunk_size or 0)
+                if self.scheduler_config.is_multi_step:
+                    # Updates happen only if the sequence is prefill
+                    self._update_num_computed_tokens_for_multi_step_prefill(
+                        seq_group, seq_group_meta, is_first_step_output)
+                else:
+                    seq_group.update_num_computed_tokens(
+                        seq_group_meta.token_chunk_size or 0)
 
             if outputs:
                 for o in outputs:
@@ -927,10 +1056,13 @@ class LLMEngine:
                             seq_group.metrics.model_execute_time = (
                                 o.model_execute_time)
 
-            self.output_processor.process_prompt_logprob(seq_group, output)
-            if seq_group_meta.do_sample:
-                self.output_processor.process_outputs(seq_group, output,
-                                                      is_async)
+            if self.model_config.runner_type == "pooling":
+                self._process_sequence_group_outputs(seq_group, output)
+            else:
+                self.output_processor.process_prompt_logprob(seq_group, output)
+                if seq_group_meta.do_sample:
+                    self.output_processor.process_outputs(
+                        seq_group, output, is_async)
 
             if seq_group.is_finished():
                 finished_now.append(i)
@@ -967,6 +1099,15 @@ class LLMEngine:
             for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
 
+        # For multi-step without streaming, don't create outputs each iteration
+        if not is_last_step and not ctx.multi_step_stream_outputs:
+            # Immediately process request outputs here (if callback is given)
+            if (finished_now
+                    and self.process_request_outputs_callback is not None):
+                self.process_request_outputs_callback(ctx.request_outputs)
+                ctx.request_outputs.clear()
+            return
+
         # Create the outputs
         for i in indices:
             if i in skip or i in finished_before or i in finished_now:
@@ -985,7 +1126,13 @@ class LLMEngine:
             if request_output:
                 ctx.request_outputs.append(request_output)
 
-        # Create outputs only after processing the scheduler's results
+        # For multi-step with streaming, create outputs each iteration
+        if not is_last_step and ctx.multi_step_stream_outputs:
+            # Immediately process request outputs here (if callback is given)
+            if self.process_request_outputs_callback is not None:
+                self.process_request_outputs_callback(ctx.request_outputs)
+                ctx.request_outputs.clear()
+            return
 
         for seq_group in scheduler_outputs.ignored_seq_groups:
             params = seq_group.sampling_params
@@ -1035,10 +1182,16 @@ class LLMEngine:
             if seq_group.is_finished():
                 continue
 
-            token_chunk_size = (seq_group_metadata.token_chunk_size
-                                if seq_group_metadata.token_chunk_size
-                                is not None else 0)
-            seq_group.update_num_computed_tokens(token_chunk_size)
+            if self.scheduler_config.is_multi_step:
+                # Updates happen only if the sequence is prefill
+                self._update_num_computed_tokens_for_multi_step_prefill(
+                    seq_group, seq_group_metadata,
+                    seq_group.state.num_steps == 1)
+            else:
+                token_chunk_size = (seq_group_metadata.token_chunk_size
+                                    if seq_group_metadata.token_chunk_size
+                                    is not None else 0)
+                seq_group.update_num_computed_tokens(token_chunk_size)
 
             if seq_group_metadata.do_sample:
                 assert len(sequence_group_outputs.samples) == 1, (
@@ -1049,10 +1202,18 @@ class LLMEngine:
                 assert len(seq_group.seqs) == 1
                 seq = seq_group.seqs[0]
 
-                seq.append_token_id(sample.output_token, sample.logprobs,
-                                    sample.output_embed)
+                if self.scheduler_config.is_multi_step:
+                    is_prefill_append = seq.data.get_num_uncomputed_tokens(
+                    ) == 0
+                    seq.append_token_id(sample.output_token, sample.logprobs,
+                                        sample.output_embed)
+                    if not is_prefill_append:
+                        seq_group.update_num_computed_tokens(1)
+                else:
+                    seq.append_token_id(sample.output_token, sample.logprobs,
+                                        sample.output_embed)
 
-    def step(self) -> List[RequestOutput]:
+    def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         <figure markdown="span">
@@ -1087,7 +1248,7 @@ class LLMEngine:
         engine = LLMEngine.from_engine_args(engine_args)
         example_inputs = [(0, "What is LLM?",
         SamplingParams(temperature=0.0))]
-
+    
         # Start the engine with an event loop
         while True:
             if example_inputs:
@@ -1153,6 +1314,13 @@ class LLMEngine:
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
 
+            if (self.scheduler_config.is_multi_step
+                    and scheduler_outputs.num_lookahead_slots > 0):
+                # cache the scheduler outputs for the next iteration if we have
+                # lookahead slots
+                self._cache_scheduler_outputs_for_multi_step(
+                    virtual_engine, seq_group_metadata_list, scheduler_outputs,
+                    allow_async_output_proc)
         else:
             finished_requests_ids = list()
 
@@ -1202,6 +1370,10 @@ class LLMEngine:
                 # Raise so the caller is notified that this request failed
                 raise
 
+            # We need to do this here so that last step's sampled_token_ids can
+            # be passed to the next iteration for PP.
+            if self.scheduler_config.is_multi_step:
+                self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
             # Nothing scheduled => If there is pending async postprocessor,
             # then finish it here.
@@ -1210,9 +1382,19 @@ class LLMEngine:
             # No outputs in this case
             outputs = []
 
+        # Finish the current step for all the sequence groups.
+        if self.scheduler_config.is_multi_step:
+            for seq_group in seq_group_metadata_list:
+                seq_group.finish_step()
+
         if not self._has_remaining_steps(seq_group_metadata_list):
+            # clear the cache if we have finished all the steps.
+            if self.scheduler_config.is_multi_step:
+                self.cached_scheduler_outputs[0] = SchedulerOutputState()
+
             # is_first_step_output is True only when the num_steps of all
-            # the sequences are 1.
+            # the sequences are 1. When the num_steps > 1,
+            # multi_step_model_runner does the first-step output append.
             is_first_step_output: bool = False if not seq_group_metadata_list \
                 else seq_group_metadata_list[0].state.num_steps == 1
 
@@ -1253,7 +1435,7 @@ class LLMEngine:
 
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
-            # torch.distributed ops which may otherwise time out, and unblocks
+            # torch.distributed ops which may otherwise timeout, and unblocks
             # the RPC thread in the workers so that they can process any other
             # queued control plane messages, such as add/remove lora adapters.
             logger.debug("Stopping remote worker execution loop.")
@@ -1296,7 +1478,22 @@ class LLMEngine:
     def _has_remaining_steps(
         self, seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
     ) -> bool:
-        return False
+        if (not self.scheduler_config.is_multi_step
+                or not seq_group_metadata_list):
+            return False
+
+        # TODO(will) this is a sanity check for nowto make sure that all the
+        # seqs are on the same steps. Eventually we will want to do some sort of
+        # dynamic scheduling when doing multi-step decoding.
+        ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
+        if any([
+                seq_group.state.remaining_steps != ref_remaining_steps
+                for seq_group in seq_group_metadata_list[1:]
+        ]):
+            raise AssertionError("All running sequence groups should "
+                                 "have the same remaining steps.")
+
+        return ref_remaining_steps > 0
 
     def _cache_scheduler_outputs_for_multi_step(
             self, virtual_engine: int,
@@ -1325,6 +1522,13 @@ class LLMEngine:
 
     def _get_last_sampled_token_ids(
             self, virtual_engine: int) -> Optional[torch.Tensor]:
+        cached_last_output = self.cached_scheduler_outputs[
+            virtual_engine].last_output
+        if (self.scheduler_config.is_multi_step
+                and self.parallel_config.pipeline_parallel_size > 1
+                and cached_last_output is not None
+                and cached_last_output.sampled_token_ids_cpu is not None):
+            return cached_last_output.sampled_token_ids_cpu
         return None
 
     def add_logger(self, logger_name: str, logger: StatLoggerBase) -> None:
@@ -1428,7 +1632,7 @@ class LLMEngine:
         num_generation_tokens_iter = 0
         num_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
-        inter_token_latencies_iter: List[float] = []
+        time_per_output_tokens_iter: List[float] = []
         num_preemption_iter = (0 if scheduler_outputs is None else
                                scheduler_outputs.preempted)
 
@@ -1512,9 +1716,9 @@ class LLMEngine:
                         num_generation_tokens_from_prefill_groups += (
                             seq_group.num_seqs())
                 else:
-                    # ITLs
+                    # TPOTs.
                     latency = seq_group.get_last_token_latency()
-                    inter_token_latencies_iter.append(latency)
+                    time_per_output_tokens_iter.append(latency)
                     if seq_group.state.current_step == 0:
                         # For async_output_proc, the do_log_stats()
                         # is called following init_multi_step(), which
@@ -1576,6 +1780,13 @@ class LLMEngine:
                 num_generation_tokens_from_prefill_groups)
             num_tokens_iter = (num_generation_tokens_iter +
                                num_prompt_tokens_iter)
+        # Spec decode, if enabled, emits specialized metrics from the worker in
+        # sampler output.
+        if model_output and isinstance(model_output[0], SamplerOutput) and (
+                model_output[0].spec_decode_worker_metrics is not None):
+            spec_decode_metrics = model_output[0].spec_decode_worker_metrics
+        else:
+            spec_decode_metrics = None
 
         return Stats(
             now=now,
@@ -1596,7 +1807,8 @@ class LLMEngine:
             num_generation_tokens_iter=num_generation_tokens_iter,
             num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
-            inter_token_latencies_iter=inter_token_latencies_iter,
+            time_per_output_tokens_iter=time_per_output_tokens_iter,
+            spec_decode_metrics=spec_decode_metrics,
             num_preemption_iter=num_preemption_iter,
 
             # Request stats
@@ -1629,6 +1841,16 @@ class LLMEngine:
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_executor.pin_lora(lora_id)
+
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        return self.model_executor.add_prompt_adapter(prompt_adapter_request)
+
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        return self.model_executor.remove_prompt_adapter(prompt_adapter_id)
+
+    def list_prompt_adapters(self) -> List[int]:
+        return self.model_executor.list_prompt_adapters()
 
     def start_profile(self) -> None:
         self.model_executor.start_profile()
@@ -1684,14 +1906,8 @@ class LLMEngine:
                 context=trace_context,
                 start_time=arrival_time_nano_seconds) as seq_span:
             metrics = seq_group.metrics
-
-            # Handle potential None values for cancelled/aborted requests
-            ttft = (metrics.first_token_time - metrics.arrival_time
-                    if metrics.first_token_time is not None else None)
-
-            e2e_time = (metrics.finished_time - metrics.arrival_time
-                        if metrics.finished_time is not None else None)
-
+            ttft = metrics.first_token_time - metrics.arrival_time
+            e2e_time = metrics.finished_time - metrics.arrival_time
             seq_span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL,
                                    self.model_config.model)
             seq_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID,
@@ -1714,18 +1930,11 @@ class LLMEngine:
                     seq.get_output_len()
                     for seq in seq_group.get_finished_seqs()
                 ]))
-
-            # Only set timing attributes if the values are available
-            if metrics.time_in_queue is not None:
-                seq_span.set_attribute(
-                    SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
-                    metrics.time_in_queue)
-            if ttft is not None:
-                seq_span.set_attribute(
-                    SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
-            if e2e_time is not None:
-                seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E,
-                                       e2e_time)
+            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
+                                   metrics.time_in_queue)
+            seq_span.set_attribute(
+                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
+            seq_span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
             if metrics.scheduler_time is not None:
                 seq_span.set_attribute(
                     SpanAttributes.GEN_AI_LATENCY_TIME_IN_SCHEDULER,
@@ -1789,7 +1998,7 @@ class LLMEngine:
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
                 if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper and Donut
+                    return  # Skip encoder length check for Whisper
 
             if model_config.is_multimodal_model:
                 suggestion = (
@@ -1814,12 +2023,42 @@ class LLMEngine:
     def _build_logits_processors(
             self, sampling_params: SamplingParams,
             lora_request: Optional[LoRARequest]) -> SamplingParams:
-        """Constructs logits processors based on the logits_bias, and
-        allowed_token_ids fields in sampling_params. Deletes those fields and
-        adds the constructed logits processors to the logits_processors field.
-        Returns the modified sampling params."""
+        """Constructs logits processors based on the guided_decoding,
+        logits_bias, and allowed_token_ids fields in sampling_params. Deletes
+        those fields and adds the constructed logits processors to the
+        logits_processors field. Returns the modified sampling params."""
 
         logits_processors = []
+
+        if sampling_params.guided_decoding is not None:
+            # Defensively copy sampling params since guided decoding logits
+            # processors can have different state for each request
+            sampling_params = copy.copy(sampling_params)
+            guided_decoding = sampling_params.guided_decoding
+
+            logger.debug(
+                "Building guided decoding logits processor in "
+                "LLMEngine. Params: %s", guided_decoding)
+
+            tokenizer = self.get_tokenizer(lora_request=lora_request)
+            guided_decoding.backend = guided_decoding.backend or \
+                self.decoding_config.backend
+
+            if self.decoding_config.reasoning_backend:
+                logger.debug("Building with reasoning backend %s",
+                             self.decoding_config.reasoning_backend)
+
+            processor = get_local_guided_decoding_logits_processor(
+                guided_params=guided_decoding,
+                tokenizer=tokenizer,
+                model_config=self.model_config,
+                reasoning_backend=self.decoding_config.reasoning_backend,
+            )
+            if processor:
+                logits_processors.append(processor)
+
+            # Unset so this doesn't get passed down to the model
+            sampling_params.guided_decoding = None
 
         if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
             tokenizer = self.get_tokenizer(lora_request=lora_request)

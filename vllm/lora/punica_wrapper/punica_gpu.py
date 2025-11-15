@@ -7,7 +7,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import Optional, Union, final
+from typing import TYPE_CHECKING, Optional, Union, final
 
 import torch
 
@@ -20,6 +20,10 @@ if HAS_TRITON:
                                           lora_shrink)
 
 from .punica_base import PunicaWrapperBase
+
+if TYPE_CHECKING:
+    # avoid circuit import
+    from vllm.lora.models import LongContextLoRAContext
 
 
 @final
@@ -51,13 +55,20 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                                                        max_num_prompts,
                                                        device=device)
 
-    def update_metadata(self, mapping: LoRAMapping,
-                        lora_index_to_id: list[Optional[int]], max_loras: int,
-                        vocab_size: int, extra_vocab_size: int, **kwargs):
+    def update_metadata(
+            self,
+            mapping: LoRAMapping,
+            lora_index_to_id: list[Optional[int]],
+            max_loras: int,
+            vocab_size: int,
+            extra_vocab_size: int,
+            long_lora_context: Optional["LongContextLoRAContext"] = None,
+            **kwargs):
 
         self.is_prefill = mapping.is_prefill
         self._update_base_metadata(mapping, lora_index_to_id, max_loras,
-                                   vocab_size, extra_vocab_size)
+                                   vocab_size, extra_vocab_size,
+                                   long_lora_context)
 
         # Prepare cuda kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)

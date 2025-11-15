@@ -4,7 +4,7 @@
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser
 
 
 def parse_args():
@@ -12,9 +12,7 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="jason9693/Qwen2.5-1.5B-apeach",
-        runner="pooling",
-        enforce_eager=True,
+        model="jason9693/Qwen2.5-1.5B-apeach", task="classify", enforce_eager=True
     )
     return parser.parse_args()
 
@@ -29,11 +27,11 @@ def main(args: Namespace):
     ]
 
     # Create an LLM.
-    # You should pass runner="pooling" for classification models
-    llm = LLM(**vars(args))
+    # You should pass task="classify" for classification models
+    model = LLM(**vars(args))
 
     # Generate logits. The output is a list of ClassificationRequestOutputs.
-    outputs = llm.classify(prompts)
+    outputs = model.classify(prompts)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)

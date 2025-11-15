@@ -10,6 +10,7 @@ from vllm import PoolingParams
 from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.utils import Device
 
@@ -32,6 +33,7 @@ class RPCProcessRequest:
     request_id: str
     lora_request: Optional[LoRARequest] = None
     trace_headers: Optional[Mapping[str, str]] = None
+    prompt_adapter_request: Optional[PromptAdapterRequest] = None
     priority: int = 0
 
     def __init__(
@@ -41,6 +43,7 @@ class RPCProcessRequest:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
         super().__init__()
@@ -50,6 +53,7 @@ class RPCProcessRequest:
         self.request_id = request_id
         self.lora_request = lora_request
         self.trace_headers = trace_headers
+        self.prompt_adapter_request = prompt_adapter_request
         self.priority = priority
 
 
@@ -120,7 +124,6 @@ class RPCLoadAdapterRequest:
 @dataclass
 class RPCAdapterLoadedResponse:
     request_id: str
-    lora_loaded: bool
 
 
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,

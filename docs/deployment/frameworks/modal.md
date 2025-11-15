@@ -1,4 +1,7 @@
-# Modal
+---
+title: Modal
+---
+[](){ #deployment-modal }
 
 vLLM can be run on cloud GPUs with [Modal](https://modal.com), a serverless computing platform designed for fast auto-scaling.
 

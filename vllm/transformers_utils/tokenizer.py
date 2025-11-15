@@ -7,6 +7,7 @@ import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
+from types import MethodType
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import huggingface_hub
@@ -15,20 +16,15 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import (
-    get_sentence_transformer_tokenizer_config)
+from vllm.lora.request import LoRARequest
+from vllm.transformers_utils.tokenizer_base import (TokenizerBase,
+                                                    TokenizerRegistry)
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import make_async
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.lora.request import LoRARequest
-    from vllm.transformers_utils.tokenizer_base import TokenizerBase
-else:
-    ModelConfig = Any
-    LoRARequest = Any
-    TokenizerBase = Any
 
 logger = init_logger(__name__)
 
@@ -142,6 +138,26 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     return cached_tokenizer
 
 
+def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
+    """Patch _pad method to accept `padding_side` for older tokenizers."""
+    orig_pad = tokenizer._pad
+
+    def _pad(
+        self: PreTrainedTokenizer,
+        *args,
+        padding_side: Optional[str] = None,
+        **kwargs,
+    ):
+        if padding_side is not None and padding_side != self.padding_side:
+            msg = ("`padding_side` argument is not supported by "
+                   f"{type(tokenizer).__name__} and will be ignored.")
+            warnings.warn(msg, stacklevel=2)
+
+        return orig_pad(*args, **kwargs)
+
+    tokenizer._pad = MethodType(_pad, tokenizer)
+
+
 def get_tokenizer(
     tokenizer_name: Union[str, Path],
     *args,
@@ -206,7 +222,6 @@ def get_tokenizer(
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),
                                                      revision=revision)
     elif tokenizer_mode == "custom":
-        from vllm.transformers_utils.tokenizer_base import TokenizerRegistry
         tokenizer = TokenizerRegistry.get_tokenizer(str(tokenizer_name),
                                                     *args,
                                                     revision=revision,
@@ -237,17 +252,11 @@ def get_tokenizer(
             else:
                 raise e
 
-        # The special_tokens in tokenizer should also be
-        # controlled by do_lower_case in encoder_config
-        encoder_config = get_sentence_transformer_tokenizer_config(
-            tokenizer_name, revision)
-        if isinstance(encoder_config, dict) and encoder_config.get(
-                "do_lower_case", False):
-            special_tokens_map = {
-                k: v.lower()
-                for k, v in tokenizer.special_tokens_map.items()
-            }
-            tokenizer.add_special_tokens(special_tokens_map)
+        # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
+        if type(tokenizer).__name__ in ("ChatGLMTokenizer",
+                                        "ChatGLM4Tokenizer"):
+            assert isinstance(tokenizer, PreTrainedTokenizer)
+            patch_padding_side(tokenizer)
 
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
@@ -262,13 +271,13 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
 def cached_tokenizer_from_config(
-    model_config: ModelConfig,
+    model_config: "ModelConfig",
     **kwargs: Any,
 ):
     return cached_get_tokenizer(
         model_config.tokenizer,
         tokenizer_mode=model_config.tokenizer_mode,
-        revision=model_config.tokenizer_revision,
+        tokenizer_revision=model_config.tokenizer_revision,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )

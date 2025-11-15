@@ -15,7 +15,6 @@ Cash Donations:
 
 Compute Resources:
 
-- Alibaba Cloud
 - AMD
 - Anyscale
 - AWS
@@ -34,7 +33,6 @@ Compute Resources:
 - Trainy
 - UC Berkeley
 - UC San Diego
-- Volcengine
 
 Slack Sponsor: Anyscale
 

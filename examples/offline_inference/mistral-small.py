@@ -68,7 +68,7 @@ def run_simple_demo(args: argparse.Namespace):
         max_model_len=4096,
         max_num_seqs=2,
         tensor_parallel_size=2,
-        mm_processor_cache_gb=0 if args.disable_mm_processor_cache else 4,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     prompt = "Describe this image in one sentence."
@@ -105,7 +105,7 @@ def run_advanced_demo(args: argparse.Namespace):
         limit_mm_per_prompt={"image": max_img_per_msg},
         max_model_len=max_img_per_msg * max_tokens_per_img,
         tensor_parallel_size=2,
-        mm_processor_cache_gb=0 if args.disable_mm_processor_cache else 4,
+        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
     )
 
     prompt = "Describe the following image."
@@ -164,9 +164,9 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--disable-mm-processor-cache",
+        "--disable-mm-preprocessor-cache",
         action="store_true",
-        help="If True, disables caching of multi-modal processor.",
+        help="If True, disables caching of multi-modal preprocessor/mapper.",
     )
     return parser.parse_args()
 

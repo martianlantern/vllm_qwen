@@ -1,6 +1,11 @@
-# Using Nginx
+---
+title: Using Nginx
+---
+[](){ #nginxloadbalancer }
 
 This document shows how to launch multiple vLLM serving containers and use Nginx to act as a load balancer between the servers.
+
+[](){ #nginxloadbalancer-nginx-build }
 
 ## Build Nginx Container
 
@@ -25,11 +30,13 @@ Build the container:
 docker build . -f Dockerfile.nginx --tag nginx-lb
 ```
 
+[](){ #nginxloadbalancer-nginx-conf }
+
 ## Create Simple Nginx Config file
 
 Create a file named `nginx_conf/nginx.conf`. Note that you can add as many servers as you'd like. In the below example we'll start with two. To add more, add another `server vllmN:8000 max_fails=3 fail_timeout=10000s;` entry to `upstream backend`.
 
-??? console "Config"
+??? Config
 
     ```console
     upstream backend {
@@ -49,6 +56,8 @@ Create a file named `nginx_conf/nginx.conf`. Note that you can add as many serve
     }
     ```
 
+[](){ #nginxloadbalancer-nginx-vllm-container }
+
 ## Build vLLM Container
 
 ```bash
@@ -67,11 +76,15 @@ docker build \
     --build-arg https_proxy=$https_proxy
 ```
 
+[](){ #nginxloadbalancer-nginx-docker-network }
+
 ## Create Docker Network
 
 ```bash
 docker network create vllm_nginx
 ```
+
+[](){ #nginxloadbalancer-nginx-launch-container }
 
 ## Launch vLLM Containers
 
@@ -82,7 +95,7 @@ Notes:
 - The below example assumes GPU backend used. If you are using CPU backend, remove `--gpus device=ID`, add `VLLM_CPU_KVCACHE_SPACE` and `VLLM_CPU_OMP_THREADS_BIND` environment variables to the docker run command.
 - Adjust the model name that you want to use in your vLLM servers if you don't want to use `Llama-2-7b-chat-hf`.
 
-??? console "Commands"
+??? Commands
 
     ```console
     mkdir -p ~/.cache/huggingface/hub/
@@ -112,6 +125,8 @@ Notes:
 !!! note
     If you are behind proxy, you can pass the proxy settings to the docker run command via `-e http_proxy=$http_proxy -e https_proxy=$https_proxy`.
 
+[](){ #nginxloadbalancer-nginx-launch-nginx }
+
 ## Launch Nginx
 
 ```bash
@@ -122,6 +137,8 @@ docker run \
     -v ./nginx_conf/:/etc/nginx/conf.d/ \
     --name nginx-lb nginx-lb:latest
 ```
+
+[](){ #nginxloadbalancer-nginx-verify-nginx }
 
 ## Verify That vLLM Servers Are Ready
 

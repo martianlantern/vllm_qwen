@@ -1,29 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
-import inspect
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union, cast
 
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.config import VerifyAndUpdateConfig
-from vllm.transformers_utils.config import (get_hf_file_bytes,
-                                            get_hf_file_to_dict)
 
 from .interfaces_base import VllmModelForPooling, is_pooling_model
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
+    from vllm.model_executor.layers.pooler import PoolingType
 
 _T = TypeVar("_T", bound=type[nn.Module])
-
-logger = init_logger(__name__)
 
 _GENERATE_SUFFIXES = [
     "ForCausalLM",
@@ -31,96 +23,6 @@ _GENERATE_SUFFIXES = [
     "ChatModel",
     "LMHeadModel",
 ]
-
-
-def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
-    """Load Sentence-Transformers Dense projection layers."""
-
-    try:
-        modules = get_hf_file_to_dict("modules.json", model_config.model,
-                                      model_config.revision)
-        if not modules:
-            return None
-
-        if isinstance(modules, dict):
-            modules = modules.get("modules", [])
-
-        dense_modules = [
-            m for m in modules
-            if m.get("type") == "sentence_transformers.models.Dense"
-        ]
-        if not dense_modules:
-            return None
-
-        layers = []
-        for module in dense_modules:
-            folder = module.get("path", "")
-
-            config_path = f"{folder}/config.json" if folder else "config.json"
-            layer_config = get_hf_file_to_dict(config_path, model_config.model,
-                                               model_config.revision)
-            if not layer_config:
-                continue
-
-            linear = nn.Linear(layer_config.get("in_features", 768),
-                               layer_config.get("out_features", 768),
-                               bias=layer_config.get("bias", True),
-                               dtype=model_config.head_dtype)
-
-            if not _load_dense_weights(linear, folder, model_config):
-                continue
-
-            layers.append(linear)
-            if act_name := layer_config.get("activation_function"):
-                layers.append(get_act_fn(act_name))
-        return nn.Sequential(*layers).to(dtype=model_config.head_dtype)
-    except Exception:
-        logger.exception("ST projector loading failed")
-
-    return None
-
-
-def _load_dense_weights(linear: nn.Linear, folder: str,
-                        model_config: "ModelConfig") -> bool:
-    """Load weights using vLLM's weight_loader pattern."""
-    from vllm.model_executor.model_loader.weight_utils import (
-        default_weight_loader)
-
-    for filename in ["model.safetensors", "pytorch_model.bin"]:
-        file_path = f"{folder}/{filename}" if folder else filename
-
-        try:
-            file_bytes = get_hf_file_bytes(file_path, model_config.model,
-                                           model_config.revision)
-            if not file_bytes:
-                continue
-
-            if filename.endswith(".safetensors"):
-                from safetensors.torch import load as load_safetensors
-                state_dict = load_safetensors(file_bytes)
-            else:
-                import io
-                state_dict = torch.load(io.BytesIO(file_bytes),
-                                        map_location="cpu",
-                                        weights_only=True)
-
-            for weight_key in ["weight", "linear.weight", "dense.weight"]:
-                if weight_key in state_dict:
-                    weight_loader = getattr(linear.weight, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(linear.weight, state_dict[weight_key])
-
-                    bias_key = weight_key.replace("weight", "bias")
-                    if linear.bias is not None and bias_key in state_dict:
-                        bias_loader = getattr(linear.bias, "weight_loader",
-                                              default_weight_loader)
-                        bias_loader(linear.bias, state_dict[bias_key])
-                    return True
-        except Exception:
-            logger.exception("Failed to load %s", filename)
-            continue
-
-    return False
 
 
 def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
@@ -132,49 +34,21 @@ def _get_pooling_model_name(orig_model_name: str, pooling_suffix: str) -> str:
     return model_name + pooling_suffix
 
 
-def try_create_mm_pooling_model_cls(orig_cls: _T) -> _T:
-
-    class CallVisitor(ast.NodeVisitor):
-
-        def __init__(self):
-            self.calls = []
-
-        def visit_Call(self, node):
-            if isinstance(node.func, ast.Name):
-                self.calls.append(node.func.id)
-            self.generic_visit(node)
-
-    visitor = CallVisitor()
-    visitor.visit(ast.parse(inspect.getsource(orig_cls)))
-    if "init_vllm_registered_model" not in visitor.calls:
-        return None
-
-    class ModelForPooling(orig_cls, VllmModelForPooling):
-
-        is_pooling_model = True
-
-        def __init__(
-            self,
-            *,
-            vllm_config: "VllmConfig",
-            prefix: str = "",
-            **kwargs: Any,
-        ) -> None:
-            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
-
-            self.pooler = self.get_language_model().pooler
-
-    return ModelForPooling  # type: ignore
-
-
-def _create_pooling_model_cls(orig_cls: _T) -> _T:
+def _create_pooling_model_cls(
+    orig_cls: _T,
+    *,
+    default_pooling_type: "PoolingType",
+    default_normalize: bool,
+    default_softmax: bool,
+) -> _T:
     # Lazy import
+    from vllm.model_executor.layers.pooler import Pooler, PoolerOutput
+    from vllm.model_executor.pooling_metadata import PoolingMetadata
+
     from .utils import AutoWeightsLoader, WeightsMapper
 
     class ModelForPooling(orig_cls, VllmModelForPooling):
 
-        is_pooling_model = True
-
         def __init__(
             self,
             *,
@@ -183,20 +57,30 @@ def _create_pooling_model_cls(orig_cls: _T) -> _T:
             **kwargs: Any,
         ) -> None:
             super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
-
-            self.vllm_config = vllm_config
 
             # These are not used in pooling models
             for attr in ("lm_head", "logits_processor"):
                 if hasattr(self, attr):
                     delattr(self, attr)
 
-            # If the model already defines a pooler instance, don't overwrite it
-            if not getattr(self, "pooler", None):
-                self._init_pooler(vllm_config, prefix=prefix)
+            pooler_config = vllm_config.model_config.pooler_config
+            assert pooler_config is not None
 
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
-            raise NotImplementedError
+            # If the model already defines a pooler instance, don't overwrite it
+            if not getattr(self, "_pooler", None):
+                self._pooler = Pooler.from_config_with_defaults(
+                    pooler_config,
+                    pooling_type=default_pooling_type,
+                    normalize=default_normalize,
+                    softmax=default_softmax,
+                )
+
+        def pooler(
+            self,
+            hidden_states: torch.Tensor,
+            pooling_metadata: PoolingMetadata,
+        ) -> PoolerOutput:
+            return self._pooler(hidden_states, pooling_metadata)
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             # TODO: Support uninitialized params tracking
@@ -249,20 +133,14 @@ def as_embedding_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+    from vllm.model_executor.layers.pooler import PoolingType
 
-    class ModelForEmbedding(_create_pooling_model_cls(cls)):
-
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
-            pooler_config = vllm_config.model_config.pooler_config
-            assert pooler_config is not None
-
-            self.pooler = DispatchPooler(
-                {
-                    "encode": Pooler.for_encode(pooler_config),
-                    "embed": Pooler.for_embed(pooler_config),
-                }, )
-
+    ModelForEmbedding = _create_pooling_model_cls(
+        cls,
+        default_pooling_type=PoolingType.LAST,
+        default_normalize=True,
+        default_softmax=False,
+    )
     ModelForEmbedding.__name__ = \
         _get_pooling_model_name(cls.__name__, "ForEmbedding")
 
@@ -286,61 +164,48 @@ def as_seq_cls_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.model_executor.layers.linear import ReplicatedLinear
-    from vllm.model_executor.layers.pooler import (ClassifierPooler,
-                                                   DispatchPooler, Pooler,
-                                                   PoolingMethod, PoolingType)
+    from vllm.model_executor.layers.linear import RowParallelLinear
+    from vllm.model_executor.layers.pooler import PoolerOutput, PoolingType
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
+    from vllm.model_executor.pooling_metadata import PoolingMetadata
     from vllm.sequence import IntermediateTensors
 
-    from .utils import get_model_hidden_size, maybe_prefix
+    from .utils import maybe_prefix
 
-    class ModelForSequenceClassification(_create_pooling_model_cls(cls),
+    ModelForPooling = _create_pooling_model_cls(
+        cls,
+        default_pooling_type=PoolingType.LAST,
+        default_normalize=False,
+        default_softmax=True,
+    )
+
+    class ModelForSequenceClassification(ModelForPooling,
                                          SupportsCrossEncoding):
 
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
+        def __init__(
+            self,
+            *,
+            vllm_config: "VllmConfig",
+            prefix: str = "",
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
+
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
-            hidden_size = get_model_hidden_size(config)
 
-            self.score = ReplicatedLinear(
-                hidden_size,
-                config.num_labels,
-                bias=False,
-                params_dtype=torch.float32,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "score"),
-            )
+            self.vllm_config = vllm_config
+            self.task = vllm_config.model_config.task
+            self.pooling_type = (
+                vllm_config.model_config.pooler_config.pooling_type)
 
-            pooler_config = vllm_config.model_config.pooler_config
-            assert pooler_config is not None
-
-            pooling_type_str = pooler_config.pooling_type
-            assert pooling_type_str is not None
-            pooling_type = PoolingType[pooling_type_str]
-
-            self.pooler = DispatchPooler({
-                "encode":
-                Pooler.for_encode(pooler_config),
-                "classify":
-                ClassifierPooler(
-                    pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self._classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config),
-                ),
-                "score":
-                ClassifierPooler(
-                    pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self._classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config),
-                ),
-            })
-
-        def _classifier(self, x: torch.Tensor):
-            x, _ = self.score(x.float())
-            return x
+            self.score = RowParallelLinear(config.hidden_size,
+                                           config.num_labels,
+                                           quant_config=quant_config,
+                                           input_is_parallel=False,
+                                           bias=False,
+                                           prefix=maybe_prefix(
+                                               prefix, "score"))
 
         def forward(
             self,
@@ -351,6 +216,33 @@ def as_seq_cls_model(cls: _T) -> _T:
         ) -> torch.Tensor:
             return super().forward(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
+
+        def pooler(
+            self,
+            hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+            pooling_metadata: PoolingMetadata,
+        ) -> PoolerOutput:
+
+            def get_logits(hidden_states):
+                if isinstance(hidden_states, list):
+                    logits = [self.score(state)[0] for state in hidden_states]
+                else:
+                    logits, _ = self.score(hidden_states)
+                return logits
+
+            if self.pooling_type == PoolingType.ALL:
+                logits = get_logits(hidden_states)
+                return self._pooler(logits, pooling_metadata)
+            else:
+                hidden_states = self._pooler.extract_states(
+                    hidden_states, pooling_metadata)
+                logits = get_logits(hidden_states)
+                pooled_data = self._pooler.head(logits, pooling_metadata)
+
+                pooled_outputs = [
+                    self._pooler.build_output(data) for data in pooled_data
+                ]
+                return PoolerOutput(outputs=pooled_outputs)
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             tokens = getattr(self.config, "classifier_from_token", None)
@@ -385,16 +277,14 @@ def as_reward_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+    from vllm.model_executor.layers.pooler import PoolingType
 
-    class ModelForReward(_create_pooling_model_cls(cls)):
-
-        def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
-            pooler_config = vllm_config.model_config.pooler_config
-            assert pooler_config is not None
-
-            self.pooler = DispatchPooler(
-                {"encode": Pooler.for_encode(pooler_config)}, )
+    ModelForReward = _create_pooling_model_cls(
+        cls,
+        default_pooling_type=PoolingType.ALL,
+        default_normalize=False,
+        default_softmax=False,
+    )
 
     ModelForReward.__name__ = \
         _get_pooling_model_name(cls.__name__, "ForReward")
@@ -422,33 +312,27 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
         else:
             config.num_labels = len(tokens)
 
-        # `llm as reranker` defaults to not using pad_token
-        use_pad_token = getattr(config, "use_pad_token", False)
-        config.use_pad_token = use_pad_token
-
 
 def load_weights_using_from_2_way_softmax(
         model, weights: Iterable[tuple[str, torch.Tensor]]):
     # refer to https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
     from vllm.model_executor.layers.vocab_parallel_embedding import (
         ParallelLMHead)
-    from vllm.model_executor.model_loader.weight_utils import (
-        default_weight_loader)
     from vllm.model_executor.models.utils import AutoWeightsLoader
 
     model_config = model.vllm_config.model_config
-
     tokens = getattr(model.config, "classifier_from_token", [])
     tokens = cast(list[int], tokens)
     assert len(tokens) == 2
 
+    device = model.score.weight.device
+
     if model.config.tie_word_embeddings:
         model.lm_head = model.model.embed_tokens
     else:
-        quant_config = model.vllm_config.quant_config
         model.lm_head = ParallelLMHead(model.config.vocab_size,
                                        model.config.hidden_size,
-                                       quant_config=quant_config)
+                                       quant_config=model.quant_config)
 
     loader = AutoWeightsLoader(model)
     loaded_weights = loader.load_weights(weights)
@@ -461,57 +345,10 @@ def load_weights_using_from_2_way_softmax(
 
     false_id = tokenizer.convert_tokens_to_ids(tokens[0])
     true_id = tokenizer.convert_tokens_to_ids(tokens[1])
-    score_weight = model.lm_head.weight.data[[true_id]].to(
-        torch.float32) - model.lm_head.weight.data[[false_id]].to(
+    weight = model.lm_head.weight.data[true_id].to(device).to(
+        torch.float32) - model.lm_head.weight.data[false_id].to(device).to(
             torch.float32)
-
-    param = model.score.weight
-    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-    weight_loader(param, score_weight)
-
-    del model.lm_head
-    loaded_weights.add("score.weight")
-    loaded_weights.discard("lm_head.weight")
-    return loaded_weights
-
-
-def load_weights_no_post_processing(model,
-                                    weights: Iterable[tuple[str,
-                                                            torch.Tensor]]):
-    from vllm.model_executor.layers.vocab_parallel_embedding import (
-        ParallelLMHead)
-    from vllm.model_executor.model_loader.weight_utils import (
-        default_weight_loader)
-    from vllm.model_executor.models.utils import AutoWeightsLoader
-
-    model_config = model.vllm_config.model_config
-    tokens = getattr(model.config, "classifier_from_token", [])
-    tokens = cast(list[int], tokens)
-    assert len(tokens) > 0
-
-    if model.config.tie_word_embeddings:
-        model.lm_head = model.model.embed_tokens
-    else:
-        quant_config = model.vllm_config.quant_config
-        model.lm_head = ParallelLMHead(model.config.vocab_size,
-                                       model.config.hidden_size,
-                                       quant_config=quant_config)
-
-    loader = AutoWeightsLoader(model)
-    loaded_weights = loader.load_weights(weights)
-
-    from vllm.transformers_utils.tokenizer import get_tokenizer
-    tokenizer = get_tokenizer(model_config.tokenizer,
-                              revision=model_config.tokenizer_revision,
-                              tokenizer_mode=model_config.tokenizer_mode,
-                              trust_remote_code=model_config.trust_remote_code)
-
-    token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
-    score_weight = model.lm_head.weight.data[token_ids]
-
-    param = model.score.weight
-    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-    weight_loader(param, score_weight)
+    model.score.weight.data.copy_(weight)
 
     del model.lm_head
     loaded_weights.add("score.weight")
@@ -521,7 +358,6 @@ def load_weights_no_post_processing(model,
 
 SEQ_CLS_LOAD_METHODS = {
     "from_2_way_softmax": load_weights_using_from_2_way_softmax,
-    "no_post_processing": load_weights_no_post_processing,
 }
 
 
@@ -532,9 +368,6 @@ def seq_cls_model_loader(model, weights: Iterable[tuple[str, torch.Tensor]]):
     #     - Qwen3-Reranker
     #   - Qwen2ForCausalLM
     #     - mxbai-rerank-v2
-    # - no_post_processing:
-    #   - GemmaForCausalLM
-    #     - bge-reranker-v2-gemma
 
     config = model.vllm_config.model_config.hf_config
     method = getattr(config, "method", None)

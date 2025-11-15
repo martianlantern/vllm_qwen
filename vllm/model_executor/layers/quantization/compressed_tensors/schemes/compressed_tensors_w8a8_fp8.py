@@ -9,8 +9,6 @@ from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, maybe_create_device_identity, normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale)
@@ -28,11 +26,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.strategy = strategy
         self.out_dtype = torch.get_default_dtype()
         self.is_static_input_scheme = is_static_input_scheme
-        self.act_q_group_shape = GroupShape.PER_TENSOR \
-            if is_static_input_scheme else GroupShape.PER_TOKEN
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.is_static_input_scheme,
-            act_quant_group_shape=self.act_q_group_shape)
+        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
 
     @classmethod
     def get_min_capability(cls) -> int:

@@ -6,7 +6,6 @@ The architecture is the same as granitemoe but with the addition of shared
 experts.
 """
 from collections.abc import Iterable
-from itertools import islice
 from typing import Optional
 
 import torch
@@ -28,7 +27,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .granitemoe import GraniteMoeAttention, GraniteMoeModel, GraniteMoeMoE
+from . import mixtral
+from .granitemoe import GraniteMoeAttention, GraniteMoeMoE
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import AutoWeightsLoader, make_layers, maybe_prefix
 
@@ -82,14 +82,12 @@ class GraniteMoeSharedDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         self.self_attn = GraniteMoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
@@ -201,7 +199,8 @@ class GraniteMoeSharedModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
             hidden_states = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -243,7 +242,7 @@ class GraniteMoeSharedModel(nn.Module):
                 new_weights[gate_name] = p
             else:
                 new_weights[n] = p
-        return GraniteMoeModel._load_weights(self, new_weights.items())
+        return mixtral.MixtralModel.load_weights(self, new_weights.items())
 
 
 class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):

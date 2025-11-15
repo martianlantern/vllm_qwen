@@ -1,15 +1,21 @@
 # ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from __future__ import annotations
+
 import argparse
 import asyncio
 import enum
 import os
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import openai
 import pydantic
-from openai.types.chat import ChatCompletionChunk
+
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletionChunk
+
 
 ConstraintsFormat = Literal[
     "choice",
@@ -33,7 +39,7 @@ async def print_stream_response(
     async for chunk in stream_response:
         delta = chunk.choices[0].delta
 
-        reasoning_chunk_text: str | None = getattr(delta, "reasoning", None)
+        reasoning_chunk_text: str | None = getattr(delta, "reasoning_content", None)
         content_chunk_text = delta.content
 
         if args.reasoning:
@@ -80,7 +86,7 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
                 "content": "Classify this sentiment: vLLM is wonderful!",
             }
         ],
-        "extra_body": {"structured_outputs": {"choice": ["positive", "negative"]}},
+        "extra_body": {"guided_choice": ["positive", "negative"]},
     },
     "regex": {
         "messages": [
@@ -90,7 +96,7 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
             }
         ],
         "extra_body": {
-            "structured_outputs": {"regex": r"[a-z0-9.]{1,20}@\w{6,10}\.com\n"},
+            "guided_regex": r"[a-z0-9.]{1,20}@\w{6,10}\.com\n",
         },
     },
     "json": {
@@ -116,8 +122,7 @@ PARAMS: dict[ConstraintsFormat, dict[str, Any]] = {
             }
         ],
         "extra_body": {
-            "structured_outputs": {
-                "grammar": """
+            "guided_grammar": """
 root ::= select_statement
 
 select_statement ::= "SELECT " column " from " table " where " condition
@@ -130,7 +135,6 @@ condition ::= column "= " number
 
 number ::= "1 " | "2 "
 """,
-            }
         },
     },
     "structural_tag": {
@@ -255,8 +259,8 @@ async def cli():
         for constraint, response in zip(constraints, results):
             print(f"\n\n{constraint}:")
             message = response.choices[0].message
-            if args.reasoning and hasattr(message, "reasoning"):
-                print(f"  Reasoning: {message.reasoning or ''}")
+            if args.reasoning and hasattr(message, "reasoning_content"):
+                print(f"  Reasoning: {message.reasoning_content or ''}")
             print(f"  Content: {message.content!r}")
 
 

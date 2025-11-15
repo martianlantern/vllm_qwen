@@ -6,8 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
-from vllm import bc_linter_include
-
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -15,19 +13,20 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorMetadata)
     from vllm.lora.request import LoRARequest
-    from vllm.multimodal.inputs import MultiModalFeatureSpec
+    from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 
 
-@bc_linter_include
 @dataclass
 class NewRequestData:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_features: list[MultiModalFeatureSpec]
+    mm_inputs: list[MultiModalKwargs]
+    mm_hashes: list[str]
+    mm_positions: list[PlaceholderRange]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     block_ids: tuple[list[int], ...]
@@ -43,7 +42,9 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            mm_features=request.mm_features,
+            mm_inputs=request.mm_inputs,
+            mm_hashes=request.mm_hashes,
+            mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             block_ids=block_ids,
@@ -55,7 +56,9 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids={self.prompt_token_ids},"
-                f"mm_features={self.mm_features},"
+                f"mm_inputs={self.mm_inputs},"
+                f"mm_hashes={self.mm_hashes},"
+                f"mm_positions={self.mm_positions},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
@@ -67,7 +70,9 @@ class NewRequestData:
         return (f"NewRequestData("
                 f"req_id={self.req_id},"
                 f"prompt_token_ids_len={len(self.prompt_token_ids)},"
-                f"mm_features={self.mm_features},"
+                f"mm_inputs={self.mm_inputs},"
+                f"mm_hashes={self.mm_hashes},"
+                f"mm_positions={self.mm_positions},"
                 f"sampling_params={self.sampling_params},"
                 f"block_ids={self.block_ids},"
                 f"num_computed_tokens={self.num_computed_tokens},"
@@ -75,7 +80,6 @@ class NewRequestData:
                 ")")
 
 
-@bc_linter_include
 @dataclass
 class CachedRequestData:
 
@@ -87,7 +91,7 @@ class CachedRequestData:
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    new_block_ids: list[Optional[tuple[list[int], ...]]]
+    new_block_ids: list[tuple[list[int], ...]]
     num_computed_tokens: list[int]
 
     @property
@@ -105,7 +109,6 @@ class CachedRequestData:
         )
 
 
-@bc_linter_include
 @dataclass
 class SchedulerOutput:
 
@@ -140,9 +143,9 @@ class SchedulerOutput:
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.
     finished_req_ids: set[str]
-    # list of mm_hash strings associated with the encoder outputs to be
-    # freed from the encoder cache.
-    free_encoder_mm_hashes: list[str]
+    # list of (req_id, encoder_input_index) tuples.
+    # Used to free the encoder cache.
+    free_encoder_input_ids: list[tuple[str, int]]
 
     # Dict of request ids to their index within the batch
     # for filling the next token bitmask

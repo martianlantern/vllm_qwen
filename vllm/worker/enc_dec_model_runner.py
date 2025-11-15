@@ -24,7 +24,8 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
 from vllm.platforms import _Backend
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
+from vllm.sequence import (IntermediateTensors, PoolerOutput,
+                           SequenceGroupMetadata)
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
@@ -90,9 +91,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         '''
         EncoderDecoderModelRunner constructor.
 
-        `lora_config` is unused (since these features are not yet supported
-        for encoder/decoder models) but these arguments are present here for
-        compatibility with the base-class constructor.
+        `lora_config` and `prompt_adapter_config` are
+        unused (since these features are not yet supported for encoder/decoder
+        models) but these arguments are present here for compatibility with 
+        the base-class constructor.
         '''
         self._maybe_force_supported_attention_backend()
 
@@ -160,7 +162,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
-    ) -> Optional[List[SamplerOutput]]:
+    ) -> Optional[List[PoolerOutput]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")

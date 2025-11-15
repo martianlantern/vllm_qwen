@@ -1,9 +1,11 @@
-# Retrieval-Augmented Generation
+---
+title: Retrieval-Augmented Generation
+---
+[](){ #deployment-retrieval-augmented-generation }
 
 [Retrieval-augmented generation (RAG)](https://en.wikipedia.org/wiki/Retrieval-augmented_generation) is a technique that enables generative artificial intelligence (Gen AI) models to retrieve and incorporate new information. It modifies interactions with a large language model (LLM) so that the model responds to user queries with reference to a specified set of documents, using this information to supplement information from its pre-existing training data. This allows LLMs to use domain-specific and/or updated information. Use cases include providing chatbot access to internal company data or generating responses based on authoritative sources.
 
 Here are the integrations:
-
 - vLLM + [langchain](https://github.com/langchain-ai/langchain) + [milvus](https://github.com/milvus-io/milvus)
 - vLLM + [llamaindex](https://github.com/run-llama/llama_index) + [milvus](https://github.com/milvus-io/milvus)
 
@@ -11,7 +13,7 @@ Here are the integrations:
 
 ### Prerequisites
 
-Set up the vLLM and langchain environment:
+- Setup vLLM and langchain environment
 
 ```bash
 pip install -U vllm \
@@ -22,33 +24,33 @@ pip install -U vllm \
 
 ### Deploy
 
-1. Start the vLLM server with the supported embedding model, e.g.
+- Start the vLLM server with the supported embedding model, e.g.
 
-    ```bash
-    # Start embedding service (port 8000)
-    vllm serve ssmits/Qwen2-7B-Instruct-embed-base
-    ```
+```bash
+# Start embedding service (port 8000)
+vllm serve ssmits/Qwen2-7B-Instruct-embed-base
+```
 
-1. Start the vLLM server with the supported chat completion model, e.g.
+- Start the vLLM server with the supported chat completion model, e.g.
 
-    ```bash
-    # Start chat service (port 8001)
-    vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
-    ```
+```bash
+# Start chat service (port 8001)
+vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
+```
 
-1. Use the script: [examples/online_serving/retrieval_augmented_generation_with_langchain.py](../../../examples/online_serving/retrieval_augmented_generation_with_langchain.py)
+- Use the script: <gh-file:examples/online_serving/retrieval_augmented_generation_with_langchain.py>
 
-1. Run the script
+- Run the script
 
-    ```bash
-    python retrieval_augmented_generation_with_langchain.py
-    ```
+```python
+python retrieval_augmented_generation_with_langchain.py
+```
 
 ## vLLM + llamaindex
 
 ### Prerequisites
 
-Set up the vLLM and llamaindex environment:
+- Setup vLLM and llamaindex environment
 
 ```bash
 pip install vllm \
@@ -60,24 +62,24 @@ pip install vllm \
 
 ### Deploy
 
-1. Start the vLLM server with the supported embedding model, e.g.
+- Start the vLLM server with the supported embedding model, e.g.
 
-    ```bash
-    # Start embedding service (port 8000)
-    vllm serve ssmits/Qwen2-7B-Instruct-embed-base
-    ```
+```bash
+# Start embedding service (port 8000)
+vllm serve ssmits/Qwen2-7B-Instruct-embed-base
+```
 
-1. Start the vLLM server with the supported chat completion model, e.g.
+- Start the vLLM server with the supported chat completion model, e.g.
 
-    ```bash
-    # Start chat service (port 8001)
-    vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
-    ```
+```bash
+# Start chat service (port 8001)
+vllm serve qwen/Qwen1.5-0.5B-Chat --port 8001
+```
 
-1. Use the script: [examples/online_serving/retrieval_augmented_generation_with_llamaindex.py](../../../examples/online_serving/retrieval_augmented_generation_with_llamaindex.py)
+- Use the script: <gh-file:examples/online_serving/retrieval_augmented_generation_with_llamaindex.py>
 
-1. Run the script:
+- Run the script
 
-    ```bash
-    python retrieval_augmented_generation_with_llamaindex.py
-    ```
+```python
+python retrieval_augmented_generation_with_llamaindex.py
+```

@@ -1,10 +1,15 @@
-# AutoGen
+---
+title: AutoGen
+---
+[](){ #deployment-autogen }
 
 [AutoGen](https://github.com/microsoft/autogen) is a framework for creating multi-agent AI applications that can act autonomously or work alongside humans.
 
 ## Prerequisites
 
-Set up the vLLM and [AutoGen](https://microsoft.github.io/autogen/0.2/docs/installation/) environment:
+- Setup vLLM environment
+
+- Setup [AutoGen](https://microsoft.github.io/autogen/0.2/docs/installation/) environment
 
 ```bash
 pip install vllm
@@ -16,15 +21,16 @@ pip install -U "autogen-agentchat" "autogen-ext[openai]"
 
 ## Deploy
 
-1. Start the vLLM server with the supported chat completion model, e.g.
+- Start the vLLM server with the supported chat completion model, e.g.
 
-    ```bash
-    vllm serve mistralai/Mistral-7B-Instruct-v0.2
-    ```
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model mistralai/Mistral-7B-Instruct-v0.2
+```
 
-1. Call it with AutoGen:
+- Call it with AutoGen:
 
-??? code
+??? Code
 
     ```python
     import asyncio

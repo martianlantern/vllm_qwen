@@ -26,12 +26,10 @@
 """Inference-only Exaone model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
-from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -51,6 +49,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.exaone import ExaoneConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
@@ -100,7 +99,7 @@ class ExaoneAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: ExaoneConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -195,7 +194,7 @@ class ExaoneBlockAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: ExaoneConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -237,7 +236,7 @@ class ExaoneDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: ExaoneConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -372,7 +371,7 @@ class ExaoneModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.h, self.start_layer, self.end_layer):
+        for layer in self.h[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
                 hidden_states,

@@ -3,14 +3,15 @@
 
 import enum
 import time
-from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import msgspec
 import torch
 
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
@@ -48,7 +49,9 @@ class EngineCoreRequest(
 
     request_id: str
     prompt_token_ids: list[int]
-    mm_features: Optional[list[MultiModalFeatureSpec]]
+    mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]]
+    mm_hashes: Optional[list[str]]
+    mm_placeholders: Optional[list[PlaceholderRange]]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     eos_token_id: Optional[int]
@@ -66,8 +69,6 @@ class EngineCoreRequest(
     # a wave finished notification is received.
     current_wave: int = 0
     priority: int = 0
-
-    trace_headers: Optional[Mapping[str, str]] = None
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -114,20 +115,12 @@ class EngineCoreOutput(
     events: Optional[list[EngineCoreEvent]] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
 
-    trace_headers: Optional[Mapping[str, str]] = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
-
-
-class UtilityResult:
-    """Wrapper for special handling when serializing/deserializing."""
-
-    def __init__(self, r: Any = None):
-        self.result = r
 
 
 class UtilityOutput(
@@ -139,7 +132,7 @@ class UtilityOutput(
 
     # Non-None implies the call failed, result should be None.
     failure_message: Optional[str] = None
-    result: Optional[UtilityResult] = None
+    result: Any = None
 
 
 class EngineCoreOutputs(
@@ -148,7 +141,7 @@ class EngineCoreOutputs(
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
-    # NOTE(Nick): We could consider ways to make this more compact,
+    #NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
     engine_index: int = 0
@@ -184,19 +177,3 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b'\x03'
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b'\x04'
-
-
-class ReconfigureDistributedRequest(msgspec.Struct):
-    new_data_parallel_size: int
-    new_data_parallel_rank: int
-    new_data_parallel_rank_local: int
-    new_data_parallel_master_ip: str
-    new_data_parallel_master_port: int
-
-
-class ReconfigureRankType(enum.IntEnum):
-    """
-    Rank type for reconfiguring distributed request.
-    """
-    KEEP_CURRENT_RANK = -1
-    SHUTDOWN_CURRENT_RANK = -2

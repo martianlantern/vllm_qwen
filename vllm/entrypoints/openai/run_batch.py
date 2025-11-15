@@ -3,7 +3,6 @@
 
 import asyncio
 import tempfile
-from argparse import Namespace
 from collections.abc import Awaitable
 from http import HTTPStatus
 from io import StringIO
@@ -14,10 +13,8 @@ import torch
 from prometheus_client import start_http_server
 from tqdm import tqdm
 
-import vllm.envs as envs
-from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
-from vllm.engine.protocol import EngineClient
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.logger import RequestLogger
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (BatchRequestInput,
@@ -33,6 +30,7 @@ from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.logger import init_logger
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, random_uuid
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -161,7 +159,7 @@ async def write_local_file(output_path: str,
     batch_outputs: The list of batch outputs to write.
     """
     # We should make this async, but as long as run_batch runs as a
-    # standalone program, blocking the event loop won't affect performance.
+    # standalone program, blocking the event loop won't effect performance.
     with open(output_path, "w", encoding="utf-8") as f:
         for o in batch_outputs:
             print(o.model_dump_json(), file=f)
@@ -300,7 +298,7 @@ async def run_request(serving_engine_func: Callable,
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
             response=BatchResponseData(
-                status_code=response.error.code,
+                status_code=response.code,
                 request_id=f"vllm-batch-{random_uuid()}"),
             error=response,
         )
@@ -312,45 +310,37 @@ async def run_request(serving_engine_func: Callable,
     return batch_output
 
 
-async def run_batch(
-    engine_client: EngineClient,
-    vllm_config: VllmConfig,
-    args: Namespace,
-) -> None:
+async def main(args):
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
         served_model_names = [args.model]
 
-    if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
-    else:
-        request_logger = None
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    engine = AsyncLLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.OPENAI_BATCH_RUNNER)
 
+    model_config = await engine.get_model_config()
     base_model_paths = [
         BaseModelPath(name=name, model_path=args.model)
         for name in served_model_names
     ]
 
-    model_config = vllm_config.model_config
-
-    if envs.VLLM_USE_V1:
-        supported_tasks = await engine_client \
-            .get_supported_tasks()  # type: ignore
+    if args.disable_log_requests:
+        request_logger = None
     else:
-        supported_tasks = model_config.supported_tasks
-
-    logger.info("Supported_tasks: %s", supported_tasks)
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
-        engine_client=engine_client,
+        engine_client=engine,
         model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=None,
+        prompt_adapters=None,
     )
     openai_serving_chat = OpenAIServingChat(
-        engine_client,
+        engine,
         model_config,
         openai_serving_models,
         args.response_role,
@@ -358,25 +348,25 @@ async def run_batch(
         chat_template=None,
         chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-    ) if "generate" in supported_tasks else None
+    ) if model_config.runner_type == "generate" else None
     openai_serving_embedding = OpenAIServingEmbedding(
-        engine_client,
+        engine,
         model_config,
         openai_serving_models,
         request_logger=request_logger,
         chat_template=None,
         chat_template_content_format="auto",
-    ) if "embed" in supported_tasks else None
+    ) if model_config.task == "embed" else None
 
-    enable_serving_reranking = ("classify" in supported_tasks and getattr(
+    enable_serving_reranking = (model_config.task == "classify" and getattr(
         model_config.hf_config, "num_labels", 0) == 1)
 
-    openai_serving_scores = ServingScores(
-        engine_client,
+    openai_serving_scores = (ServingScores(
+        engine,
         model_config,
         openai_serving_models,
         request_logger=request_logger,
-    ) if ("embed" in supported_tasks or enable_serving_reranking) else None
+    ) if (model_config.task == "embed" or enable_serving_reranking) else None)
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
@@ -464,20 +454,6 @@ async def run_batch(
         responses = await asyncio.gather(*response_futures)
 
     await write_file(args.output_file, responses, args.output_tmp_dir)
-
-
-async def main(args: Namespace):
-    from vllm.entrypoints.openai.api_server import build_async_engine_client
-    from vllm.usage.usage_lib import UsageContext
-
-    async with build_async_engine_client(
-            args,
-            usage_context=UsageContext.OPENAI_BATCH_RUNNER,
-            disable_frontend_multiprocessing=False,
-    ) as engine_client:
-        vllm_config = await engine_client.get_vllm_config()
-
-        await run_batch(engine_client, vllm_config, args)
 
 
 if __name__ == "__main__":

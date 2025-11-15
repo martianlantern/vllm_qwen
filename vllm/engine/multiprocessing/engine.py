@@ -34,7 +34,6 @@ from vllm.outputs import RequestOutput
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import deprecate_kwargs
 from vllm.worker.model_runner_base import InputProcessingError
 
 logger = init_logger(__name__)
@@ -49,7 +48,7 @@ class MQLLMEngine:
 
     This class is used to wrap the
     [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] class to enable use
-    in concurrent manner. It runs a background loop and uses zeromq to
+    in concurrnet manner. It runs a background loop and uses zeromq to
     receive new requests and stream outputs incrementally via ipc.
 
     The [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] generate or encode
@@ -121,20 +120,10 @@ class MQLLMEngine:
             return ENGINE_DEAD_ERROR()
 
     @classmethod
-    @deprecate_kwargs(
-        "disable_log_requests",
-        additional_message=("This argument will have no effect. "
-                            "Use `enable_log_requests` instead."),
-    )
-    def from_vllm_config(
-            cls,
-            vllm_config: VllmConfig,
-            usage_context: UsageContext,
-            enable_log_requests: bool,
-            disable_log_stats: bool,
-            ipc_path: str,
-            disable_log_requests: bool = True,  # Deprecated, will be removed
-    ) -> "MQLLMEngine":
+    def from_vllm_config(cls, vllm_config: VllmConfig,
+                         usage_context: UsageContext,
+                         disable_log_requests: bool, disable_log_stats: bool,
+                         ipc_path: str) -> "MQLLMEngine":
         # Setup plugins for each process
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -147,7 +136,7 @@ class MQLLMEngine:
             ipc_path=ipc_path,
             usage_context=usage_context,
             use_async_sockets=use_async_sockets,
-            log_requests=enable_log_requests,
+            log_requests=(not disable_log_requests),
             log_stats=(not disable_log_stats),
         )
 
@@ -161,7 +150,7 @@ class MQLLMEngine:
             ipc_path=ipc_path,
             vllm_config=vllm_config,
             usage_context=usage_context,
-            enable_log_requests=engine_args.enable_log_requests,
+            disable_log_requests=engine_args.disable_log_requests,
             disable_log_stats=engine_args.disable_log_stats,
         )
 
@@ -315,12 +304,14 @@ class MQLLMEngine:
             self._send_outputs(rpc_err)
 
         try:
-            self.engine.add_request(request_id=request_id,
-                                    prompt=request.prompt,
-                                    params=request.params,
-                                    lora_request=request.lora_request,
-                                    trace_headers=request.trace_headers,
-                                    priority=request.priority)
+            self.engine.add_request(
+                request_id=request_id,
+                prompt=request.prompt,
+                params=request.params,
+                lora_request=request.lora_request,
+                trace_headers=request.trace_headers,
+                prompt_adapter_request=request.prompt_adapter_request,
+                priority=request.priority)
 
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)
@@ -347,7 +338,7 @@ class MQLLMEngine:
 
     def _handle_load_adapter_request(self, request: RPCLoadAdapterRequest):
         try:
-            lora_loaded = self.engine.add_lora(request.lora_request)
+            self.engine.add_lora(request.lora_request)
         except BaseException as e:
             # Send back an error if the adater fails to load
             rpc_err = RPCError(request_id=request.request_id,
@@ -357,8 +348,7 @@ class MQLLMEngine:
             return
         # Otherwise, send back the successful load message
         self._send_outputs(
-            RPCAdapterLoadedResponse(request_id=request.request_id,
-                                     lora_loaded=lora_loaded))
+            RPCAdapterLoadedResponse(request_id=request.request_id))
 
     def _handle_is_sleeping_request(self, request: RPCIsSleepingRequest):
         is_sleeping = self.is_sleeping()
@@ -448,7 +438,7 @@ def signal_handler(*_) -> None:
 
 def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
                   ipc_path: str, disable_log_stats: bool,
-                  enable_log_requests: bool, engine_alive):
+                  disable_log_requests: bool, engine_alive):
     try:
         # Ensure we can serialize transformer config before spawning
         maybe_register_config_serialize_by_value()
@@ -457,7 +447,7 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
             vllm_config=vllm_config,
             usage_context=usage_context,
             disable_log_stats=disable_log_stats,
-            enable_log_requests=enable_log_requests,
+            disable_log_requests=disable_log_requests,
             ipc_path=ipc_path)
 
         signal.signal(signal.SIGTERM, signal_handler)

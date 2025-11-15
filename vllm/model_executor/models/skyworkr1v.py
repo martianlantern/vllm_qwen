@@ -7,8 +7,9 @@
 # Copyright (c) 2025 Skywork
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
+from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional, Union
+from typing import Literal, Optional, TypedDict, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -26,7 +27,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems, NestedTensors)
+                                    MultiModalKwargs, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -35,7 +36,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
@@ -49,42 +49,27 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
-class SkyworkR1VImagePixelInputs(TensorSchema):
+class SkyworkR1VImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    pixel_values_flat: torch.Tensor
     """
-    Dimensions:
-        - bnp: Batch size * number of images * (1 + num_patches)
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
-        - bn: Batch size * number of images
+    Shape:
+    `(batch_size * num_images * (1 + num_patches), num_channels, height, width)`
     """
-    type: Literal["pixel_values"] = "pixel_values"
 
-    pixel_values_flat: Annotated[
-        torch.Tensor,
-        TensorShape("bnp", 3, "h", "w"),
-    ]
-
-    num_patches: Annotated[
-        torch.Tensor,
-        TensorShape("bn"),
-    ]
+    num_patches: torch.Tensor
+    """Shape: `(batch_size * num_images)`"""
 
 
-class SkyworkR1VImageEmbeddingInputs(TensorSchema):
+class SkyworkR1VImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: Union[torch.Tensor, list[torch.Tensor]]
+    """ 
+    A tensor of shape `(num_images, total_image_feature_size, hidden_size)`
+    or a list of tensors of shape `(total_image_feature_size, hidden_size)`
+
+    `hidden_size` must match the hidden size of language model backbone.
     """
-    Dimensions:
-        - ni: Number of images
-        - ifs: Image feature size
-        - hs: Hidden size (must match the hidden size of language model 
-          backbone)
-    """
-    type: Literal["image_embeds"] = "image_embeds"
-
-    data: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("ni", "ifs", "hs"),
-    ]
 
 
 SkyworkR1VImageInputs = Union[SkyworkR1VImagePixelInputs,
@@ -247,7 +232,7 @@ def image_to_pixel_values_skyworkr1v(
     return pixel_values
 
 
-class SkyworkR1VProcessor:
+class BaseSkyworkR1VProcessor(ABC):
     """
     This model doesn't define its own HF processor,
     so we implement our own one here.
@@ -294,18 +279,17 @@ class SkyworkR1VProcessor:
         self.use_thumbnail: bool = config.use_thumbnail
 
     @property
+    @abstractmethod
     def image_token_id(self) -> int:
-        return self.tokenizer.get_vocab()[IMG_CONTEXT]
+        raise NotImplementedError
 
+    @abstractmethod
     def get_image_repl(
         self,
         feature_size: int,
         num_patches: Optional[int],
     ) -> PromptUpdateDetails[str]:
-        repl_features = IMG_CONTEXT * feature_size
-        repl_full = IMG_START + repl_features + IMG_END
-
-        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
+        raise NotImplementedError
 
     def resolve_min_max_num(
         self,
@@ -442,15 +426,35 @@ class SkyworkR1VProcessor:
         }
 
 
-class SkyworkR1VProcessingInfo(BaseProcessingInfo):
+class SkyworkR1VProcessor(BaseSkyworkR1VProcessor):
 
-    def get_hf_processor(self, **kwargs: object) -> SkyworkR1VProcessor:
-        return self.ctx.init_processor(
-            SkyworkR1VProcessor,
-            config=self.get_hf_config(),
-            tokenizer=self.get_tokenizer(),
-            **kwargs,
-        )
+    @property
+    def image_token_id(self) -> int:
+        return self.tokenizer.get_vocab()[IMG_CONTEXT]
+
+    def get_image_repl(
+        self,
+        feature_size: int,
+        num_patches: Optional[int],
+    ) -> PromptUpdateDetails[str]:
+        repl_features = IMG_CONTEXT * feature_size
+        repl_full = IMG_START + repl_features + IMG_END
+
+        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
+
+
+class BaseSkyworkR1VProcessingInfo(BaseProcessingInfo):
+
+    @abstractmethod
+    def get_hf_processor(
+        self,
+        *,
+        min_dynamic_patch: Optional[int] = None,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
+    ) -> BaseSkyworkR1VProcessor:
+        raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -460,7 +464,7 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[SkyworkR1VProcessor],
+        processor: Optional[BaseSkyworkR1VProcessor],
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -496,8 +500,10 @@ class SkyworkR1VProcessingInfo(BaseProcessingInfo):
         return largest_feature_pinpoint
 
 
-class SkyworkR1VDummyInputsBuilder(
-        BaseDummyInputsBuilder[SkyworkR1VProcessingInfo]):
+_I = TypeVar("_I", bound=BaseSkyworkR1VProcessingInfo)
+
+
+class SkyworkR1VDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -521,8 +527,7 @@ class SkyworkR1VDummyInputsBuilder(
         }
 
 
-class SkyworkR1VMultiModalProcessor(
-        BaseMultiModalProcessor[SkyworkR1VProcessingInfo]):
+class SkyworkR1VMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _call_hf_processor(
         self,
@@ -568,19 +573,18 @@ class SkyworkR1VMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
+        out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        out_mm_data = out_mm_kwargs.get_data()
-        if "image_num_patches" in out_mm_data:
-            image_num_patches = out_mm_data["image_num_patches"]
+        if "image_num_patches" in out_mm_kwargs:
+            image_num_patches = out_mm_kwargs["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
             image_num_patches = image_num_patches.tolist()
-        elif "image_embeds" in out_mm_data:
+        elif "image_embeds" in out_mm_kwargs:
             # TODO: Use image size information in dictionary embedding inputs
             # to compute num_patches (similar to Qwen2-VL)
-            image_num_patches = [None] * len(out_mm_data["image_embeds"])
+            image_num_patches = [None] * len(out_mm_kwargs["image_embeds"])
         else:
             image_num_patches = []
 
@@ -611,6 +615,31 @@ class SkyworkR1VMultiModalProcessor(
                 replacement=get_replacement_skyworkr1v,
             )
         ]
+
+
+class SkyworkR1VProcessingInfo(BaseSkyworkR1VProcessingInfo):
+
+    def get_hf_processor(
+        self,
+        *,
+        min_dynamic_patch: Optional[int] = None,
+        max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
+        **kwargs: object,
+    ) -> SkyworkR1VProcessor:
+        if min_dynamic_patch is not None:
+            kwargs["min_dynamic_patch"] = min_dynamic_patch
+        if max_dynamic_patch is not None:
+            kwargs["max_dynamic_patch"] = max_dynamic_patch
+        if dynamic_image_size is not None:
+            kwargs["dynamic_image_size"] = dynamic_image_size
+
+        return self.ctx.init_processor(
+            SkyworkR1VProcessor,
+            config=self.get_hf_config(),
+            tokenizer=self.get_tokenizer(),
+            **kwargs,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -747,6 +776,26 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
 
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+
+        h = w = self.config.vision_config.image_size
+        expected_dims = (3, h, w)
+
+        def _validate_shape(d: torch.Tensor):
+            actual_dims = tuple(d.shape)
+
+            if actual_dims != expected_dims:
+                expected_expr = str(expected_dims)
+                raise ValueError(
+                    "The expected shape of pixel values per image per batch "
+                    f" per patch is {expected_expr}. "
+                    f"You supplied {tuple(d.shape)}.")
+
+        for d in data:
+            _validate_shape(d)
+
+        return data
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[SkyworkR1VImageInputs]:
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
@@ -784,12 +833,10 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
             return SkyworkR1VImagePixelInputs(
                 type="pixel_values",
-                pixel_values_flat=pixel_values_flat,
+                pixel_values_flat=self._validate_pixel_values(
+                    pixel_values_flat),
                 num_patches=image_num_patches,
-                resolve_bindings={
-                    "h": self.config.vision_config.image_size,
-                    "w": self.config.vision_config.image_size,
-                })
+            )
 
         raise AssertionError("This line should be unreachable.")
 

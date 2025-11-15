@@ -1,4 +1,7 @@
-# LlamaIndex
+---
+title: LlamaIndex
+---
+[](){ #serving-llamaindex }
 
 vLLM is also available via [LlamaIndex](https://github.com/run-llama/llama_index) .
 

@@ -22,7 +22,6 @@
 """Inference-only StabeLM (https://github.com/Stability-AI/StableLM)
 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -248,7 +247,7 @@ class StableLMEpochModel(nn.Module):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(positions, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})

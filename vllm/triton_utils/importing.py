@@ -92,4 +92,3 @@ class TritonLanguagePlaceholder(types.ModuleType):
         self.constexpr = None
         self.dtype = None
         self.int64 = None
-        self.int32 = None

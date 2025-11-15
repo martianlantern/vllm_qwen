@@ -8,6 +8,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
+from typing import Optional, Union
 
 import aiohttp
 import huggingface_hub.constants
@@ -27,13 +28,12 @@ class RequestFuncInput:
     prompt_len: int
     output_len: int
     model: str
-    model_name: str | None = None
-    logprobs: int | None = None
-    extra_body: dict | None = None
-    multi_modal_content: dict | list[dict] | None = None
+    model_name: Optional[str] = None
+    logprobs: Optional[int] = None
+    extra_body: Optional[dict] = None
+    multi_modal_content: Optional[dict] = None
     ignore_eos: bool = False
-    language: str | None = None
-    request_id: str | None = None
+    language: Optional[str] = None
 
 
 @dataclass
@@ -51,7 +51,7 @@ class RequestFuncOutput:
 
 async def async_request_tgi(
     request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -71,9 +71,6 @@ async def async_request_tgi(
             "inputs": request_func_input.prompt,
             "parameters": params,
         }
-        headers = None
-        if request_func_input.request_id:
-            headers = {"x-request-id": request_func_input.request_id}
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
         if request_func_input.ignore_eos:
@@ -85,9 +82,7 @@ async def async_request_tgi(
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
-            async with session.post(
-                url=api_url, json=payload, headers=headers
-            ) as response:
+            async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
@@ -132,7 +127,7 @@ async def async_request_tgi(
 
 async def async_request_trt_llm(
     request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith("generate_stream")
@@ -150,9 +145,6 @@ async def async_request_trt_llm(
         }
         if request_func_input.ignore_eos:
             payload["min_length"] = request_func_input.output_len
-        headers = None
-        if request_func_input.request_id:
-            headers = {"x-request-id": request_func_input.request_id}
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
 
@@ -160,9 +152,7 @@ async def async_request_trt_llm(
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
-            async with session.post(
-                url=api_url, json=payload, headers=headers
-            ) as response:
+            async with session.post(url=api_url, json=payload) as response:
                 if response.status == 200:
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
@@ -203,7 +193,7 @@ async def async_request_trt_llm(
 
 async def async_request_deepspeed_mii(
     request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("completions", "profile")), (
@@ -221,8 +211,6 @@ async def async_request_deepspeed_mii(
             "top_p": 1.0,
         }
         headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
-        if request_func_input.request_id:
-            headers["x-request-id"] = request_func_input.request_id
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
@@ -266,7 +254,7 @@ async def async_request_deepspeed_mii(
 
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("completions", "profile")), (
@@ -295,8 +283,6 @@ async def async_request_openai_completions(
         if request_func_input.extra_body:
             payload.update(request_func_input.extra_body)
         headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
-        if request_func_input.request_id:
-            headers["x-request-id"] = request_func_input.request_id
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
@@ -366,7 +352,7 @@ async def async_request_openai_completions(
 
 async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     assert api_url.endswith(("chat/completions", "profile")), (
@@ -378,15 +364,7 @@ async def async_request_openai_chat_completions(
     ) as session:
         content = [{"type": "text", "text": request_func_input.prompt}]
         if request_func_input.multi_modal_content:
-            mm_content = request_func_input.multi_modal_content
-            if isinstance(mm_content, list):
-                content.extend(mm_content)
-            elif isinstance(mm_content, dict):
-                content.append(mm_content)
-            else:
-                raise TypeError(
-                    "multi_modal_content must be a dict or list[dict] for openai-chat"
-                )
+            content.append(request_func_input.multi_modal_content)
         payload = {
             "model": request_func_input.model_name
             if request_func_input.model_name
@@ -409,8 +387,6 @@ async def async_request_openai_chat_completions(
             "Content-Type": "application/json",
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         }
-        if request_func_input.request_id:
-            headers["x-request-id"] = request_func_input.request_id
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
@@ -475,7 +451,7 @@ async def async_request_openai_chat_completions(
 
 async def async_request_openai_audio(
     request_func_input: RequestFuncInput,
-    pbar: tqdm | None = None,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     # Lazy import without PlaceholderModule to avoid vllm dep.
     import soundfile
@@ -507,8 +483,6 @@ async def async_request_openai_audio(
         headers = {
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         }
-        if request_func_input.request_id:
-            headers["x-request-id"] = request_func_input.request_id
 
         # Send audio file
         def to_bytes(y, sr):
@@ -517,10 +491,7 @@ async def async_request_openai_audio(
             buffer.seek(0)
             return buffer
 
-        mm_audio = request_func_input.multi_modal_content
-        if not isinstance(mm_audio, dict) or "audio" not in mm_audio:
-            raise TypeError("multi_modal_content must be a dict containing 'audio'")
-        with to_bytes(*mm_audio["audio"]) as f:
+        with to_bytes(*request_func_input.multi_modal_content["audio"]) as f:
             form = aiohttp.FormData()
             form.add_field("file", f, content_type="audio/wav")
             for key, value in payload.items():
@@ -609,7 +580,7 @@ def get_tokenizer(
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
     **kwargs,
-) -> PreTrainedTokenizer | PreTrainedTokenizerFast:
+) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
     if pretrained_model_name_or_path is not None and not os.path.exists(
         pretrained_model_name_or_path
     ):

@@ -1,4 +1,7 @@
-# SkyPilot
+---
+title: SkyPilot
+---
+[](){ #deployment-skypilot }
 
 <p align="center">
   <img src="https://imgur.com/yxtzPEu.png" alt="vLLM"/>
@@ -21,7 +24,7 @@ sky check
 
 See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypilot-org/skypilot/blob/master/llm/vllm/serve.yaml).
 
-??? code "Yaml"
+??? Yaml
 
     ```yaml
     resources:
@@ -32,7 +35,6 @@ See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypil
       ports: 8081  # Expose to internet traffic.
 
     envs:
-      PYTHONUNBUFFERED: 1
       MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
@@ -48,8 +50,9 @@ See the vLLM SkyPilot YAML for serving, [serving.yaml](https://github.com/skypil
     run: |
       conda activate vllm
       echo 'Starting vllm api server...'
-      vllm serve $MODEL_NAME \
+      python -u -m vllm.entrypoints.openai.api_server \
         --port 8081 \
+        --model $MODEL_NAME \
         --trust-remote-code \
         --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
         2>&1 | tee api_server.log &
@@ -92,7 +95,7 @@ HF_TOKEN="your-huggingface-token" \
 
 SkyPilot can scale up the service to multiple service replicas with built-in autoscaling, load-balancing and fault-tolerance. You can do it by adding a services section to the YAML file.
 
-??? code "Yaml"
+??? Yaml
 
     ```yaml
     service:
@@ -108,7 +111,7 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
       max_completion_tokens: 1
     ```
 
-??? code "Yaml"
+??? Yaml
 
     ```yaml
     service:
@@ -131,7 +134,6 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
       ports: 8081  # Expose to internet traffic.
 
     envs:
-      PYTHONUNBUFFERED: 1
       MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
@@ -147,8 +149,9 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
     run: |
       conda activate vllm
       echo 'Starting vllm api server...'
-      vllm serve $MODEL_NAME \
+      python -u -m vllm.entrypoints.openai.api_server \
         --port 8081 \
+        --model $MODEL_NAME \
         --trust-remote-code \
         --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
         2>&1 | tee api_server.log
@@ -183,7 +186,7 @@ vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP([Spot]{'L4': 1})  R
 
 After the service is READY, you can find a single endpoint for the service and access the service with the endpoint:
 
-??? console "Commands"
+??? Commands
 
     ```bash
     ENDPOINT=$(sky serve status --endpoint 8081 vllm)
@@ -217,7 +220,7 @@ service:
 
 This will scale the service up to when the QPS exceeds 2 for each replica.
 
-??? code "Yaml"
+??? Yaml
 
     ```yaml
     service:
@@ -243,7 +246,6 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
       ports: 8081  # Expose to internet traffic.
 
     envs:
-      PYTHONUNBUFFERED: 1
       MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
       HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
 
@@ -259,8 +261,9 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
     run: |
       conda activate vllm
       echo 'Starting vllm api server...'
-      vllm serve $MODEL_NAME \
+      python -u -m vllm.entrypoints.openai.api_server \
         --port 8081 \
+        --model $MODEL_NAME \
         --trust-remote-code \
         --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
         2>&1 | tee api_server.log
@@ -282,7 +285,7 @@ sky serve down vllm
 
 It is also possible to access the Llama-3 service with a separate GUI frontend, so the user requests send to the GUI will be load-balanced across replicas.
 
-??? code "Yaml"
+??? Yaml
 
     ```yaml
     envs:

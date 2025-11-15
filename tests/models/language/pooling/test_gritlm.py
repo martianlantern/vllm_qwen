@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import numpy as np
+from __future__ import annotations
+
+import importlib.util
+from array import array
+
 import openai
 import pytest
 from scipy.spatial.distance import cosine
@@ -10,40 +14,44 @@ from vllm.config import ModelConfig
 
 from ....utils import RemoteOpenAIServer
 
+# GritLM embedding implementation is only supported by XFormers backend.
+pytestmark = pytest.mark.skipif(not importlib.util.find_spec("xformers"),
+                                reason="GritLM requires XFormers")
+
 MODEL_NAME = "parasail-ai/GritLM-7B-vllm"
 MAX_MODEL_LEN = 4000
-ATOL = 0.002
 
 
 def _arr(arr):
     """
     Convert a list of integers to an array of integers.
     """
-    return np.array(arr)
+    return array("i", arr)
 
 
 def test_find_array():
-    from vllm.model_executor.models.gritlm import GritLMMeanPool
+    from vllm.model_executor.models.gritlm import GritLMPooler
 
     model_config = ModelConfig(
         MODEL_NAME,
-        runner="pooling",
+        task="embed",
+        tokenizer=MODEL_NAME,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
         dtype="bfloat16",
         seed=0,
     )
-    pooling = GritLMMeanPool(model_config=model_config)
+    pooler = GritLMPooler(model_config=model_config)
 
     arr = _arr([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
 
-    assert pooling._find_array(arr, _arr([3, 4, 5]), start_idx=0) == 3
-    assert pooling._find_array(arr, _arr([3, 4, 5]), start_idx=1) == 3
-    assert pooling._find_array(arr, _arr([3, 4, 5]), start_idx=5) == -1
-    assert pooling._find_array(arr, _arr([3, 4, 5]), end_idx=3) == -1
-    assert pooling._find_array(arr, _arr([3, 4, 5]), end_idx=4) == 3
-    assert pooling._find_array(arr, _arr([3, 5]), start_idx=0) == -1
+    assert pooler._find_array(arr, _arr([3, 4, 5]), start_idx=0) == 3
+    assert pooler._find_array(arr, _arr([3, 4, 5]), start_idx=1) == 3
+    assert pooler._find_array(arr, _arr([3, 4, 5]), start_idx=5) == -1
+    assert pooler._find_array(arr, _arr([3, 5]), start_idx=0) == -1
 
     with pytest.raises(ValueError):
-        pooling._find_array(arr, _arr([3, 4, 5]), start_idx=-1)
+        pooler._find_array(arr, _arr([3, 4, 5]), start_idx=-1)
 
 
 def run_llm_encode(
@@ -68,9 +76,8 @@ async def run_client_embeddings(
 
 
 def gritlm_instruction(instruction):
-    return (
-        "<|user|>\n" + instruction + "\n<|embed|>\n" if instruction else "<|embed|>\n"
-    )
+    return ("<|user|>\n" + instruction +
+            "\n<|embed|>\n" if instruction else "<|embed|>\n")
 
 
 def get_test_data():
@@ -79,8 +86,7 @@ def get_test_data():
     README.md in https://github.com/ContextualAI/gritlm
     """
     q_instruction = gritlm_instruction(
-        "Given a scientific paper title, retrieve the paper's abstract",
-    )
+        "Given a scientific paper title, retrieve the paper's abstract", )
     queries = [
         "Bitcoin: A Peer-to-Peer Electronic Cash System",
         "Generative Representational Instruction Tuning",
@@ -98,27 +104,27 @@ def get_test_data():
 
 def validate_embed_output(q_rep: list[list[float]], d_rep: list[list[float]]):
     cosine_sim_q0_d0 = 1 - cosine(q_rep[0], d_rep[0])
-    assert cosine_sim_q0_d0 == pytest.approx(0.609, abs=ATOL)
+    assert cosine_sim_q0_d0 == pytest.approx(0.609, abs=0.001)
 
     cosine_sim_q0_d1 = 1 - cosine(q_rep[0], d_rep[1])
-    assert cosine_sim_q0_d1 == pytest.approx(0.101, abs=ATOL)
+    assert cosine_sim_q0_d1 == pytest.approx(0.101, abs=0.001)
 
     cosine_sim_q1_d0 = 1 - cosine(q_rep[1], d_rep[0])
-    assert cosine_sim_q1_d0 == pytest.approx(0.120, abs=ATOL)
+    assert cosine_sim_q1_d0 == pytest.approx(0.120, abs=0.001)
 
     cosine_sim_q1_d1 = 1 - cosine(q_rep[1], d_rep[1])
-    assert cosine_sim_q1_d1 == pytest.approx(0.534, abs=ATOL)
+    assert cosine_sim_q1_d1 == pytest.approx(0.534, abs=0.001)
 
 
 def test_gritlm_offline_embedding(vllm_runner):
     queries, q_instruction, documents, d_instruction = get_test_data()
 
     with vllm_runner(
-        MODEL_NAME,
-        runner="pooling",
-        max_model_len=MAX_MODEL_LEN,
+            MODEL_NAME,
+            task="embed",
+            max_model_len=MAX_MODEL_LEN,
     ) as vllm_model:
-        llm = vllm_model.llm
+        llm = vllm_model.model
 
         d_rep = run_llm_encode(
             llm,
@@ -138,7 +144,7 @@ def test_gritlm_offline_embedding(vllm_runner):
 async def test_gritlm_api_server_embedding():
     queries, q_instruction, documents, d_instruction = get_test_data()
 
-    args = ["--runner", "pooling", "--max_model_len", str(MAX_MODEL_LEN)]
+    args = ["--task", "embed", "--max_model_len", str(MAX_MODEL_LEN)]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as server:
         client_embedding = server.get_async_client()
@@ -161,11 +167,11 @@ def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
     input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
     with vllm_runner(
-        MODEL_NAME,
-        runner="generate",
-        max_model_len=MAX_MODEL_LEN,
+            MODEL_NAME,
+            task="generate",
+            max_model_len=MAX_MODEL_LEN,
     ) as vllm_model:
-        llm = vllm_model.llm
+        llm = vllm_model.model
 
         sampling_params = SamplingParams(temperature=0.0, max_tokens=256)
         outputs = llm.generate(input, sampling_params=sampling_params)
@@ -177,7 +183,7 @@ def test_gritlm_offline_generate(monkeypatch: pytest.MonkeyPatch, vllm_runner):
 async def test_gritlm_api_server_generate():
     input = "<|user|>\nWhat is the capital of France?\n<|assistant|>\n"
 
-    args = ["--runner", "generate", "--max_model_len", str(MAX_MODEL_LEN)]
+    args = ["--task", "generate", "--max_model_len", str(MAX_MODEL_LEN)]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as server:
         client_generate = server.get_async_client()

@@ -24,14 +24,19 @@
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
-#include "../cuda_compat.h"
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
-  #include "../quantization/w8a8/fp8/amd/quant_utils.cuh"
+  #include "../quantization/fp8/amd/quant_utils.cuh"
 typedef __hip_bfloat16 __nv_bfloat16;
 #else
-  #include "../quantization/w8a8/fp8/nvidia/quant_utils.cuh"
+  #include "../quantization/fp8/nvidia/quant_utils.cuh"
+#endif
+
+#ifndef USE_ROCM
+  #define WARP_SIZE 32
+#else
+  #define WARP_SIZE warpSize
 #endif
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -665,6 +670,7 @@ __global__ void paged_attention_v2_reduce_kernel(
 
 }  // namespace vllm
 
+#undef WARP_SIZE
 #undef MAX
 #undef MIN
 #undef DIVIDE_ROUND_UP

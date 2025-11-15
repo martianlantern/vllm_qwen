@@ -6,17 +6,19 @@ set -exuo pipefail
 
 # Try building the docker image
 cat <<EOF | docker build -t hpu-plugin-v1-test-env -f - .
-FROM gaudi-base-image:latest
+FROM 1.22-413-pt2.7.1:latest
 
 COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm
 
+RUN pip install -v -r requirements/hpu.txt
+RUN pip install git+https://github.com/vllm-project/vllm-gaudi.git
+
 ENV no_proxy=localhost,127.0.0.1
 ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 
-RUN VLLM_TARGET_DEVICE=empty pip install .
-RUN pip install git+https://github.com/vllm-project/vllm-gaudi.git
+RUN VLLM_TARGET_DEVICE=hpu python3 setup.py install
 
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils

@@ -14,6 +14,7 @@ __all__ = [
     "AttentionMetadata",
     "AttentionType",
     "AttentionMetadataBuilder",
+    "Attention",
     "AttentionState",
     "get_attn_backend",
 ]

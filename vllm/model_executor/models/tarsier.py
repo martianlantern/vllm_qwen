@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import (Annotated, Final, Literal, Optional, Protocol, TypeVar,
+from typing import (Final, Literal, Optional, Protocol, TypedDict, TypeVar,
                     Union, cast)
 
 import torch
@@ -13,11 +13,13 @@ from transformers import LlavaConfig as HfLlavaConfig
 from transformers import PretrainedConfig, SiglipVisionConfig
 from transformers.image_utils import ImageInput, get_image_size, to_numpy_array
 from transformers.models.llava import LlavaProcessor
-from transformers.processing_utils import ProcessingKwargs, Unpack
+from transformers.processing_utils import (ProcessingKwargs, Unpack,
+                                           _validate_images_text_input_order)
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
+from vllm.jsontree import json_map_leaves
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -25,17 +27,14 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.llava import LlavaDummyInputsBuilder
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargs
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
+                                        BaseProcessingInfo, ProcessingCache,
+                                        PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.jsontree import json_map_leaves
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -45,28 +44,14 @@ from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
 from .vision import VisionEncoderInfo, get_vision_encoder_info
 
 
-class TarsierImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
-    """
-    type: Literal["pixel_values"] = "pixel_values"
-    pixel_values: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
+class TarsierImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    pixel_values: torch.Tensor
 
 
-class TarsierImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - ifs: Image feature size
-        - hs: Hidden size (must match the hidden size of language model
-          backbone)
-    """
-    type: Literal["image_embeds"] = "image_embeds"
-    data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
+class TarsierImageEmbeddingInputs(TypedDict):
+    type: Literal["image_embeds"]
+    data: torch.Tensor
 
 
 TarsierImageInputs = Union[TarsierImagePixelInputs,
@@ -108,6 +93,9 @@ class TarsierProcessor(LlavaProcessor):
         if images is None and text is None:
             raise ValueError(
                 "You have to specify at least one of `images` or `text`.")
+
+        # check if images and text inputs are reversed for BC
+        images, text = _validate_images_text_input_order(images, text)
 
         output_kwargs = self._merge_kwargs(
             TarsierProcessorKwargs,
@@ -194,11 +182,13 @@ class TarsierProcessingInfo(BaseProcessingInfo):
         return get_vision_encoder_info(self.get_hf_config())
 
     def get_hf_processor(self, **kwargs: object) -> TarsierProcessor:
-        vision_info = self.get_vision_encoder_info()
-
-        kwargs.setdefault("patch_size", vision_info.get_patch_size())
-
-        return self.ctx.get_hf_processor(TarsierProcessor, **kwargs)
+        hf_processor = self.ctx.get_hf_processor(TarsierProcessor, **kwargs)
+        # Patch for patch_size if needed (copied from vLLM LLaVA)
+        if hasattr(hf_processor,
+                   'patch_size') and hf_processor.patch_size is None:
+            patch_size = self.get_vision_encoder_info().get_patch_size()
+            hf_processor.patch_size = patch_size
+        return hf_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -291,7 +281,7 @@ class TarsierMultiModalProcessor(BaseMultiModalProcessor[_I_Tarsier]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
+        out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index  # The <IMAGE> token ID
@@ -333,7 +323,7 @@ def _build_tarsier_hf_processor(
     info: _I_Tarsier,
     dummy_inputs: BaseDummyInputsBuilder[_I_Tarsier],
     *,
-    cache: Optional[BaseMultiModalProcessorCache] = None,
+    cache: Optional[ProcessingCache] = None,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, TarsierProcessingInfo):
         return TarsierMultiModalProcessor(
@@ -448,6 +438,18 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
+    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
+        h = w = self.config.vision_config.image_size
+        expected_dims = (3, h, w)  # Assuming 3 channels
+        actual_dims = tuple(data.shape[1:])
+
+        if actual_dims != expected_dims:
+            expected_expr = ("batch_size", *map(str, expected_dims))
+            raise ValueError(
+                f"The expected shape of pixel values is {expected_expr}. "
+                f"You supplied {tuple(data.shape)}.")
+        return data
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[TarsierImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -463,7 +465,8 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             return TarsierImagePixelInputs(
                 type="pixel_values",
-                pixel_values=flatten_bn(pixel_values, concat=True),
+                pixel_values=self._validate_pixel_values(
+                    flatten_bn(pixel_values, concat=True)),
             )
 
         if image_embeds is not None:

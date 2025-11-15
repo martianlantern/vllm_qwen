@@ -51,25 +51,6 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
         self.hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        if getattr(config, "norm_before_residual", False):
-            self._residual_norm = self._norm_before_residual
-        else:
-            self._residual_norm = self._norm_after_residual
-
-    def _norm_before_residual(
-            self,
-            hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states = self.hidden_norm(hidden_states)
-        residual = hidden_states
-        return hidden_states, residual
-
-    def _norm_after_residual(
-            self,
-            hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = hidden_states
-        hidden_states = self.hidden_norm(hidden_states)
-        return hidden_states, residual
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -78,10 +59,9 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
+        residual = hidden_states
         embeds = self.input_layernorm(embeds)
-
-        hidden_states, residual = self._residual_norm(
-            hidden_states=hidden_states)
+        hidden_states = self.hidden_norm(hidden_states)
 
         hidden_states = torch.cat([embeds, hidden_states], dim=-1)
         # Self Attention
@@ -122,7 +102,7 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(
-                config=self.config,
+                self.config,
                 prefix=maybe_prefix(prefix, f"layers.{start_layer_id}"),
             )
         ])
@@ -199,10 +179,6 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             speculative_config.draft_model_config.hf_config
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config)
-
-        # Store target layer count in draft config for
-        # proper layer_types indexing in draft models
-        self.config.target_layer_count = target_layer_num
         self.model = LlamaModel(vllm_config=vllm_config,
                                 prefix="model",
                                 start_layer_id=target_layer_num)
@@ -226,12 +202,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if inputs_embeds is not None:
-            raise NotImplementedError(
-                f"{type(self).__name__} does not support multimodal inputs yet."
-            )
         return self.model(input_ids, positions, hidden_states)
 
     def compute_logits(

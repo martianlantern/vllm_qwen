@@ -6,11 +6,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import torch
+import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_gather)
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -22,8 +22,7 @@ if envs.VLLM_LOGITS_PROCESSOR_THREADS is not None:
         envs.VLLM_LOGITS_PROCESSOR_THREADS)
 
 
-@CustomOp.register("logits_processor")
-class LogitsProcessor(CustomOp):
+class LogitsProcessor(nn.Module):
     """Process logits and apply logits processors from sampling metadata.
 
     This layer does the following:
@@ -60,12 +59,11 @@ class LogitsProcessor(CustomOp):
         hidden_states: torch.Tensor,
         sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
-        prune_hidden_states: bool = True,
     ) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
         else:
-            if sampling_metadata is not None and prune_hidden_states:
+            if sampling_metadata is not None:
                 hidden_states = _prune_hidden_states(hidden_states,
                                                      sampling_metadata)
 

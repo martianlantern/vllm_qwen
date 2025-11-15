@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
+from typing import Any, Optional
 
 import torch
 
 from vllm import envs
-from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
+from vllm.attention.backends.abstract import (AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
@@ -42,6 +42,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
+            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             kv_sharing_target_layer_name: Optional[str],
@@ -49,14 +50,17 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
-                         logits_soft_cap, attn_type,
+                         blocksparse_params, logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
 
-        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
+        unsupported_features = [
+            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
+        ]
         if any(unsupported_features):
             raise NotImplementedError(
                 "TritonMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, logits_soft_cap")
+                "alibi_slopes, sliding_window, blocksparse_params, "
+                "logits_soft_cap")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
@@ -123,22 +127,20 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
-        layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError("FP8 Triton MLA not yet supported")
 
-        if type(q) is tuple:
-            q = torch.cat(q, dim=-1)
+        B = q_nope.shape[0]
 
-        assert isinstance(q, torch.Tensor)
-        B = q.shape[0]
+        q = torch.cat([q_nope, q_pe], dim=-1)
         o = torch.zeros(B,
                         self.num_heads,
                         self.kv_lora_rank,
@@ -172,4 +174,4 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                              attn_metadata.decode.seq_lens, attn_logits,
                              num_kv_splits, self.scale, PAGE_SIZE)
 
-        return o, None
+        return self._v_up_proj(o)

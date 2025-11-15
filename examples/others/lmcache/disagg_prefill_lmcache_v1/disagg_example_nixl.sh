@@ -21,14 +21,8 @@ check_hf_token() {
 }
 
 check_num_gpus() {
-    # can you check if the number of GPUs are >=2 via nvidia-smi/rocm-smi?
-    which rocm-smi > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-	num_gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
-    else
-	num_gpus=$(rocm-smi --showid | grep Instinct | wc -l)
-    fi
-
+    # can you check if the number of GPUs are >=2 via nvidia-smi?
+    num_gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
     if [ "$num_gpus" -lt 2 ]; then
         echo "You need at least 2 GPUs to run disaggregated prefill."
         exit 1
@@ -128,7 +122,7 @@ main() {
 
     # begin benchmark
     cd ../../../../benchmarks/
-    vllm bench serve --port 9000 --seed $(date +%s) \
+    python3 benchmark_serving.py --port 9000 --seed $(date +%s) \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
         --num-prompts 200 --burstiness 100 --request-rate 3.6 | tee benchmark.log

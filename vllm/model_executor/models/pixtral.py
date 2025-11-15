@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import Annotated, Literal, Optional, Union
+from typing import Literal, Optional, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -15,7 +15,7 @@ from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
-from transformers import BatchFeature, PixtralVisionConfig, TensorType
+from transformers import PixtralVisionConfig, TensorType
 from transformers.image_utils import ImageInput
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens)
@@ -33,22 +33,19 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalUUIDDict, NestedTensors)
+                                    NestedTensors)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo,
-                                        MultiModalProcessingInfo,
+                                        BaseProcessingInfo, MultiModalHashes,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
                                                cached_tokenizer_from_config)
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
@@ -57,32 +54,22 @@ from .vision import VisionEncoderInfo, resolve_visual_encoder_outputs
 
 try:
     from xformers import ops as xops
-    if (current_platform.is_cuda()
-            and current_platform.has_device_capability(100)):
-        # Xformers FA is not compatible with B200
-        USE_XFORMERS_OPS = False
-    else:
-        USE_XFORMERS_OPS = True
+    USE_XFORMERS_OPS = True
 except ImportError:
     USE_XFORMERS_OPS = False
 
 PATCH_MERGE = "patch_merge"
 
 
-class PixtralImagePixelInputs(TensorSchema):
+class PixtralImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+
+    images: Union[torch.Tensor, list[torch.Tensor]]
     """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
-    
+    Shape: `(batch_size * num_images, num_channels, image_width, image_height)`
+
     The result of stacking `ImageEncoding.tokens` from each prompt.
     """
-    type: Literal["pixel_values"] = "pixel_values"
-
-    images: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                      TensorShape("bn", 3, "h", "w", dynamic_dims={"h", "w"})]
 
 
 class PixtralProcessorAdapter:
@@ -163,12 +150,10 @@ class PixtralProcessorAdapter:
             images_processed.append(image_processed)
             images_tokens.append(image_tokens)
 
-        return BatchFeature({
-            "input_ids":
-            torch.cat(images_tokens)[None].expand(len(text), -1),
-            "images":
-            images_processed,
-        })
+        return {
+            "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
+            "images": images_processed,
+        }
 
 
 class PixtralProcessingInfo(BaseProcessingInfo):
@@ -282,7 +267,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargsItems,
+        out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -316,18 +301,24 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
-        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
+        *,
+        return_mm_hashes: bool,
+    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+        (
+            prompt_ids,
+            mm_kwargs,
+            mm_hashes,
+            _,
+        ) = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
+            return_mm_hashes=return_mm_hashes,
         )
 
         # NOTE: The tokens are already inserted by the chat template
-        return prompt_ids, mm_info, True
+        return prompt_ids, mm_kwargs, mm_hashes, True
 
 
 @MULTIMODAL_REGISTRY.register_processor(PixtralMultiModalProcessor,
@@ -390,6 +381,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         images = kwargs.pop("images", None)
         if images is None:
             return None
+
+        if not isinstance(images, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of images. "
+                             f"Got type: {type(images)}")
 
         return PixtralImagePixelInputs(
             type="pixel_values",
@@ -670,19 +665,7 @@ class Attention(nn.Module):
         v = v.reshape(batch, patches, self.n_heads, self.head_dim)
 
         q, k = apply_rotary_emb_vit(q, k, freqs_cis=freqs_cis)
-
-        if USE_XFORMERS_OPS:
-            out = xops.memory_efficient_attention(q, k, v, attn_bias=mask)
-        else:
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
-            out = nn.functional.scaled_dot_product_attention(q,
-                                                             k,
-                                                             v,
-                                                             attn_mask=mask)
-            out = out.transpose(1, 2)
-
+        out = xops.memory_efficient_attention(q, k, v, attn_bias=mask)
         out = out.reshape(batch, patches, self.n_heads * self.head_dim)
         return self.wo(out)
 
@@ -825,11 +808,8 @@ class VisionTransformer(nn.Module):
             mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], )
         else:
-            from transformers.models.pixtral.modeling_pixtral import (
-                generate_block_attention_mask)
-            mask = generate_block_attention_mask(
-                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
-                patch_embeds)
+            raise ImportError("Xformers is required for Pixtral inference "
+                              "with the Mistral format")
         out = self.transformer(patch_embeds, mask=mask, freqs_cis=freqs_cis)
 
         # squeeze dim 0 and split into separate tensors for each image
@@ -1102,6 +1082,7 @@ class PixtralHFAttention(nn.Module):
             # Transpose q and k back for attention
             q = q.transpose(1, 2).contiguous()
             k = k.transpose(1, 2).contiguous()
+
             out = xops.memory_efficient_attention(q,
                                                   k,
                                                   v,

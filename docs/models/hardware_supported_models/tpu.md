@@ -1,8 +1,10 @@
-# TPU
+---
+title: TPU
+---
+[](){ #tpu-supported-models }
 
-## Supported Models
-
-### Text-only Language Models
+# TPU Supported Models
+## Text-only Language Models
 
 | Model                                               | Architecture                   | Supported |
 |-----------------------------------------------------|--------------------------------|-----------|
