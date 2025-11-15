@@ -14,7 +14,6 @@ if __name__ == '__main__':
 
     llm = LLM(
             model=MODEL_PATH, trust_remote_code=True, gpu_memory_utilization=0.95,
-            tensor_parallel_size=torch.cuda.device_count(),
             limit_mm_per_prompt={'image': 0, 'video': 0, 'audio': 1},
             max_num_seqs=4,
             max_model_len=16384,
