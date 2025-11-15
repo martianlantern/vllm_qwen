@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import Any
+from typing import Any, Union
 
 from transformers import PretrainedConfig
 
 from vllm.transformers_utils.configs.speculators.algos import (
-    SUPPORTED_SPECULATORS_TYPES,
-)
+    SUPPORTED_SPECULATORS_TYPES)
 
 __all__ = ["SpeculatorsConfig"]
 
@@ -18,35 +17,28 @@ class SpeculatorsConfig(PretrainedConfig):
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: str | os.PathLike,
+        pretrained_model_name_or_path: Union[str, os.PathLike],
         **kwargs,
     ) -> "SpeculatorsConfig":
         """Load speculators Eagle config and convert to vLLM format."""
-        config_dict, _ = cls.get_config_dict(pretrained_model_name_or_path, **kwargs)
+        config_dict, _ = cls.get_config_dict(pretrained_model_name_or_path,
+                                             **kwargs)
 
-        vllm_config = cls.extract_vllm_speculative_config(config_dict)
-        return cls(**vllm_config)
-
-    @classmethod
-    def extract_vllm_speculative_config(
-        cls, config_dict: dict[str, Any]
-    ) -> dict[str, Any]:
         speculators_model_type = config_dict.get("speculators_model_type")
         if speculators_model_type not in SUPPORTED_SPECULATORS_TYPES:
             raise ValueError(
                 f"Expected one of: {SUPPORTED_SPECULATORS_TYPES}. "
-                "Please ensure you're loading a speculators-format model."
-            )
+                "Please ensure you're loading a speculators-format model.")
 
         # validate fields
         # TODO: @dsikka - use speculators pydantic model to validate
         cls.validate_speculators_config(config_dict=config_dict)
         # Convert from speculators config -> format that can be ingested by vLLM
-        vllm_config = cls.build_vllm_speculative_config(config_dict=config_dict)
+        vllm_config = cls.convert_speculators_to_vllm(config_dict=config_dict)
         # Apply anything specific to the supported algorithm
         algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
         algo_updater(config_dict=config_dict, vllm_config=vllm_config)
-        return vllm_config
+        return cls(**vllm_config)
 
     @classmethod
     def validate_speculators_config(cls, config_dict: dict[str, Any]) -> None:
@@ -65,50 +57,35 @@ class SpeculatorsConfig(PretrainedConfig):
 
         if not isinstance(config_dict["transformer_layer_config"], dict):
             raise TypeError(
-                "'transformer_layer_config' must be a dictionary if provided"
-            )
+                "'transformer_layer_config' must be a dictionary if provided")
 
     @classmethod
-    def build_vllm_speculative_config(
-        cls, config_dict: dict[str, Any]
-    ) -> dict[str, Any]:
+    def convert_speculators_to_vllm(
+            cls, config_dict: dict[str, Any]) -> dict[str, Any]:
         """
-        Build vLLM-compatible speculative configuration from speculators format.
-
-        This method extracts and transforms speculative configuration from the
-        speculators format into the structure expected by vLLM.
-
-        Args:
-            config_dict: Configuration dictionary in speculators format
-
+        Convert speculators config format to vLLM format.
+        
+        This method handles the translation of field names and structure
+        between speculators and vLLM formats.
+        
         Returns:
-            Dictionary with vLLM-compatible speculative configuration
+            Dictionary with vLLM-compatible configuration
         """
-        # Extract speculators configuration
-        spec_config = config_dict["speculators_config"]
-
         # Currently we only support one proposal method
-        proposal_methods = spec_config.get("proposal_methods")
-        if not proposal_methods:
-            raise ValueError("No proposal methods found in speculators config")
+        spec_config = config_dict["speculators_config"]
+        first_method = spec_config.get("proposal_methods")[0]
+        num_lookahead_tokens = first_method.get("speculative_tokens")
 
-        first_method = proposal_methods[0]
-        num_speculative_tokens = first_method.get("speculative_tokens")
-
-        if num_speculative_tokens is None:
+        if num_lookahead_tokens is None:
             raise ValueError(
-                f"Missing 'speculative_tokens' in proposal method. Got: {first_method}"
-            )
+                "Missing 'speculative_tokens' in proposal method. "
+                f"Got: {first_method}")
 
-        # Build base vLLM speculative configuration
+        # Build base vLLM config
         vllm_config = {
             "method": config_dict.get("speculators_model_type"),
-            "num_speculative_tokens": num_speculative_tokens,
-            "target_model": spec_config.get("verifier")["name_or_path"],
+            "num_lookahead_tokens": num_lookahead_tokens,
+            "target_model": spec_config.get("verifier")["name_or_path"]
         }
-
-        # Merge transformer layer configuration if present
-        transformer_config = config_dict.get("transformer_layer_config", {})
-        vllm_config.update(transformer_config)
-
+        vllm_config.update(config_dict["transformer_layer_config"])
         return vllm_config

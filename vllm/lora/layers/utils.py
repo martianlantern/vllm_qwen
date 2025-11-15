@@ -1,21 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
+from vllm.adapter_commons.layers import AdapterMapping
+
 
 @dataclass
-class LoRAMapping:
-    index_mapping: tuple[int, ...]
-    prompt_mapping: tuple[int, ...]
+class LoRAMapping(AdapterMapping):
     is_prefill: bool = False
-
-    def __post_init__(self):
-        self.index_mapping = tuple(self.index_mapping)
-        self.prompt_mapping = tuple(self.prompt_mapping)
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
@@ -45,7 +40,8 @@ def _not_fully_sharded_can_replace(can_replace):
 
     def dec(*args, **kwargs):
         decorate = kwargs.pop("decorate") if "decorate" in kwargs else True
-        condition = not kwargs["lora_config"].fully_sharded_loras if decorate else True
+        condition = (not kwargs["lora_config"].fully_sharded_loras
+                     if decorate else True)
         return can_replace(*args, **kwargs) and condition
 
     return dec
@@ -58,8 +54,7 @@ def _fully_sharded_can_replace(can_replace):
     """
 
     def dec(*args, **kwargs):
-        return (
-            can_replace(*args, **kwargs) and kwargs["lora_config"].fully_sharded_loras
-        )
+        return (can_replace(*args, **kwargs)
+                and kwargs["lora_config"].fully_sharded_loras)
 
     return dec

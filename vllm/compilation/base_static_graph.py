@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from vllm.config import CUDAGraphMode, VllmConfig
 
@@ -13,13 +12,8 @@ class AbstractStaticGraphWrapper(Protocol):
     to be captured as a static graph.
     """
 
-    def __init__(
-        self,
-        runnable: Callable[..., Any],
-        vllm_config: VllmConfig,
-        runtime_mode: CUDAGraphMode,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, runnable: Callable, vllm_config: VllmConfig,
+                 runtime_mode: CUDAGraphMode, **kwargs):
         """
         Initializes the StaticGraphWrapper class with graph capturing and
         execution-related configurations.
@@ -37,7 +31,7 @@ class AbstractStaticGraphWrapper(Protocol):
         """
         raise NotImplementedError
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self, *args, **kwargs) -> Any:
         """
         Executes the wrapped callable.
 
