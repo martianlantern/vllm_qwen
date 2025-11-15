@@ -78,8 +78,8 @@ if __name__ == '__main__':
     num_tokens = len(outputs[0].outputs[0].token_ids)
     metrics = outputs[0].metrics
     time_in_queue = metrics.time_in_queue
-    time_to_first_token = metrics.first_token_time - metrics.arrival_time
-    e2e_latency = metrics.finished_time - metrics.arrival_time
+    time_to_first_token = metrics.first_token_time - metrics.first_scheduled_time
+    e2e_latency = metrics.finished_time - metrics.first_scheduled_time
     time_per_output_token = e2e_latency / num_tokens
     inter_token_latency = (metrics.last_token_time - metrics.first_token_time) / (num_tokens - 1)
 
