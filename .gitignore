@@ -8,6 +8,7 @@ vllm/vllm_flash_attn/*
 __pycache__/
 *.py[cod]
 *$py.class
+audio_stream.webm
 
 # C extensions
 *.so
